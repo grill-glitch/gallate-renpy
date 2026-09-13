@@ -1,29 +1,7 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-
-# Virtual environments
-.venv/
-venv/
-env/
-.python-version
-
-# Build / dist
-build/
-dist/
-*.egg-info/
-*.egg
-
-# Test / coverage
-.pytest_cache/
-.coverage
-.coverage.*
-htmlcov/
-.tox/
-.cache
+# Go build artifacts
+/sirenhead-tool
+*.test
+*.out
 
 # Editor / OS
 .DS_Store

@@ -4,6 +4,158 @@ All notable changes to `sirenhead-tool` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-09-13
+
+Rewritten in Go. One static binary, no Python runtime, no `pip install`.
+Same CLI grammar, same unit ids, same byte offsets, same exit codes,
+same wire format — plus the conformance gaps the Python version had.
+
+### Changed
+
+- **Implementation language: Python → Go** (`cmd/sirenhead-tool` +
+  `internal/sirenhead/`, ~6 300 lines including tests). The Python
+  package, the `sirenhead-tool` wrapper script and `pyproject.toml`
+  are gone; the Python implementation lives on `main`. Build with
+  `go build -o sirenhead-tool ./cmd/sirenhead-tool` (Go ≥ 1.22, one
+  dependency: `gopkg.in/yaml.v3`).
+- `--version` reports `0.4.0`; the version constant exists in exactly
+  one place (`internal/sirenhead/version.go`) and is asserted equal to
+  the `manifest` document by a test.
+
+### Fixed
+
+- **`--dry-run` was parsed and then ignored.** It now plans without
+  executing: config/input/media/ignore are resolved, counts are
+  reported, and nothing is written — no unit files, no media sidecars,
+  no `.meta.json`, no source edits, and no pre/post scripts
+  (docs/shell-layer/09 § 9.3).
+- **`--ignore` was parsed and then ignored.** Patterns now apply to the
+  whole resource lifecycle — ignored `.rpy` files are never read, and
+  ignored media is never classified, extracted or injected
+  (docs/shell-layer/09 § 9.2). CLI patterns MERGE with the YAML
+  `ignore:` list, they do not replace it.
+- **`scripts:` was never executed.** `scripts.pre` / `scripts.post` now
+  run in definition order with the Project Root as working directory,
+  and a failing script exits 10 (Script Failure). `--dry-run` skips
+  them.
+- **The GCWP handshake did not match `schema/protocol.schema.yaml`**
+  (it emitted `{"type","name","version","supported"}` with no
+  `protocol` object). It now carries the required
+  `protocol{name,version}` plus a top-level `version`, and keeps
+  `supported` for older Wrappers.
+- **`response.protocol.version` was a JSON number** (`1.0`) where the
+  schema requires the string `"1.0"`.
+- **Protocol-layer exit codes were the shell table's.** A failed GCWP
+  extract returned 7 (which means "protocol error" in
+  docs/protocol/02) and a failed inject returned 8 ("internal error").
+  The protocol table is now used properly: 1 operation failed,
+  2 invalid arguments, 3 invalid configuration, 4 unsupported
+  operation, 5 validation failed, 7 protocol error, 8 internal error.
+- **Standard tier requires `progress` events**; the old CLI emitted
+  none, and exactly one `file` event per operation. Both are now
+  streamed per phase and per file.
+- **Inject could write some files and then fail on a later one.** It is
+  now strictly two-pass: pass 1 validates every gate (span inside the
+  file, quoted literal present, source matches, target encodes) and
+  rebuilds every file in memory; pass 2 writes. Any failure ⇒ exit 8
+  and **nothing** is written.
+- **Re-extraction destroyed translated work.** `target` and friends are
+  *authored* fields, and docs/shell-layer/12 § 12.13 says the CLI MUST
+  NOT recompute them. Extract now reads the previous unit files and
+  keeps `target` / `state` / `context` / `notes` / `provenance` for
+  every id whose source is unchanged; when a position's source changed,
+  the stale translation is dropped and the entry is labelled
+  `needs_review` instead of being carried into a string it no longer
+  describes.
+- **`--engine.in-place=false` without `--output`** silently wrote
+  in-place; it is now a configuration error (3).
+- Sub-media `excludes` naming something outside `includes` exited 7;
+  it is a configuration error and now exits 3
+  (docs/shell-layer/04 § 4.3 rule 5).
+- The declared validation rules are now actually **run** during inject
+  and reported as `validation` events (`double-quote-balance`,
+  `renpy-substitution-preserved`, `max-target-length`, the last one
+  configurable via `--engine.max-length=N`). All are `warning`/`info`,
+  so a finding never changes the exit code.
+- `.meta.json` is read and preserved: entries owned by another CLI
+  (`cli.id` ≠ `sirenhead`) survive a re-extract instead of being
+  overwritten, and a `schema_version` newer than this CLI knows is
+  refused (3) instead of being misinterpreted.
+- Ren'Py `.rpy` files in UTF-16 are now skipped with an explicit
+  warning rather than extracted with offsets that do not address the
+  file (the byte-offset model is UTF-8).
+
+### Added
+
+- **`text:` block** (docs/shell-layer/05 § 5.8):
+  `layout: flat|mirror|single`, `metadata.{original_file,
+  source_context, location, placeholders, engine_path}` emission flags,
+  `hardcoded.context_lines` / `max_bytes`, `lifecycle.written_on:
+  extract|never`, and `meta:` key mappings for the five spec fields.
+- **`init` follows docs/shell-layer/07**: default media is the standard
+  baseline (`text` + `image`) per § 7.6, `--media` values are
+  deduplicated as a union, `--input` / `--output` are resolved against
+  the final Project Root (§ 7.5), and generated `ignore:` patterns are
+  double-quoted as the spec example shows.
+- Media injection is ignore-aware and reports — instead of silently
+  skipping — a sidecar whose `target` or source file has disappeared
+  (`MEDIA_TARGET_MISSING`, `SOURCE_MISSING`), per the "never silent
+  corruption" rule of docs/shell-layer/13 § 13.8.
+- `text.kept` / `text.stale` counters in the statistics payload.
+- `scripts/verify.sh` + `make verify`: gofmt, vet, the self-tests, a
+  build, and a real-game round-trip (extract and empty-target inject
+  must leave every game file byte-identical; a source edited behind the
+  CLI's back must make inject exit 8 without writing).
+
+### Compatibility notes (output shape)
+
+Unit ids, source strings, kinds, speakers, byte offsets, byte lengths
+and line numbers are unchanged — verified field-by-field against 0.3.0
+on a real game (see below). Three deliberate document changes:
+
+- Entries now also carry the spec's standard metadata keys
+  `original_file`, `location` and `engine_path` (this is the
+  `text.metadata.*` default of docs/shell-layer/05 § 5.8). Turn them off
+  individually, or set `text.lifecycle.written_on: never` to emit none
+  of the metadata (inject then re-derives locations by re-extracting).
+- `source_context.snippet` now spans up to 3 lines of surrounding source
+  (`text.hardcoded.context_lines`, default 3 per the spec) and
+  `end_line` follows it, instead of holding the string's own line only.
+  Set `text.hardcoded.context_lines: 1` for the 0.3.0 shape.
+- `.meta.json`: `files[].size` / `files[].hash` now describe the
+  **project file** as docs/shell-layer/13 § 13.4.1 specifies; 0.3.0
+  recorded the game asset's size/hash there (both are still available
+  under `extensions.sirenhead.media_byte_count` / `media_hash`).
+  `extensions.sirenhead.byte_count` now counts UTF-8 bytes, matching its
+  name (0.3.0 counted characters).
+
+### Verification
+
+Run on this commit against the real game
+(`SirenHeadDatingSim-1.0-pc`, `script.rpy` + `screens.rpy`):
+
+- `go test ./...` — 22 test functions (37 cases), all passing.
+- `./scripts/verify.sh` — gofmt clean, vet clean, tests pass, and on the
+  real game: 223 units extracted, every game file byte-identical after
+  extract and after an empty-target inject, drift probe aborting with
+  exit 8 and writing nothing.
+- Equivalence harness vs the 0.3.0 Python implementation, on the same
+  inputs (the in-repo fixture, and the real game): **3 250 checks, 0
+  failures** — identical unit ids / sources / kinds / speakers /
+  offsets / lengths / lines (223 units on the real game), identical
+  `.meta.json` mappings, identical media classification
+  (background/portrait/cg/ui, voice/bgm/sfx, cutscene/opening/ending),
+  and **byte-identical game files after translating 54 units** (105
+  files compared). 25 differences, all of them the documented output
+  changes above.
+- Schema validation of every machine-readable document against the
+  spec's `schema/*.schema.yaml` (Draft 7, via `jsonschema`): manifest,
+  features, validation-rules, protocol, response, every event, identify,
+  statistics payload and `.meta.json` — **3 202 checks, 0 failures**,
+  plus the non-schema rules (`<resource-path>:L<line>` ids, unique ids
+  per document, `gallate.translation` v1 container, four-field
+  `source_context`, `line <= end_line`, standard `state` labels).
+
 ## [0.3.0] — 2026-09-13
 
 Found on a real playthrough: the menu was partly untranslated and the

@@ -1,3 +1,0 @@
-# Marker file (PEP 561) declaring that this package ships type
-# information. Downstream type checkers (mypy, pyright) will pick
-# up the inline annotations.
