@@ -58,7 +58,7 @@ from .renpy_extract import (
 )
 
 # Kept in sync with pyproject.toml.
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # Translation unit file format. Per docs/shell-layer/12 § 12.4.1:
 UNIT_FORMAT = "gallate.translation"
@@ -318,7 +318,26 @@ def do_extract(args) -> dict:
     )
 
     # ----- image / audio / video media -----
+    # Per docs/shell-layer/04 § 4.4 / 4.5: CLI media flags
+    # override the YAML `media:` list completely. If neither is
+    # set, no media extraction happens (text-only).
     from . import media as media_mod
+
+    # Decide which media kinds to process.
+    config_media = config.get("media") or []
+    kinds_requested = (
+        set(args.media) if args.media
+        else set(config_media)
+    )
+    # The CLI exposes only `text` per `features.media`; image/
+    # audio/video are engine-extension. We accept whichever kinds
+    # the user named, regardless of whether they are declared —
+    # media_mod.extract_media raises if a sub-media identifier
+    # is unknown.
+    do_image = "image" in kinds_requested
+    do_audio = "audio" in kinds_requested
+    do_video = "video" in kinds_requested
+
     img_inc, img_exc = _parse_sub_media_overrides(config, args, "image")
     aud_inc, aud_exc = _parse_sub_media_overrides(config, args, "audio")
     vid_inc, vid_exc = _parse_sub_media_overrides(config, args, "video")
@@ -328,6 +347,11 @@ def do_extract(args) -> dict:
             image_includes=img_inc, image_excludes=img_exc,
             audio_includes=aud_inc, audio_excludes=aud_exc,
             video_includes=vid_inc, video_excludes=vid_exc,
+            enabled={
+                "image": do_image,
+                "audio": do_audio,
+                "video": do_video,
+            },
         )
     except ValueError as e:
         # Sub-media misconfiguration.

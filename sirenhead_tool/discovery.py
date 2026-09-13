@@ -16,7 +16,7 @@ CLI_NAME = "Siren Head Dating Sim CLI"
 # Kept in sync with pyproject.toml and sirenhead_tool/extract.__version__.
 # Bump in lockstep with those — otherwise `sirenhead-tool --version`
 # lies, which the v0.2.0 ad-hoc verify script caught immediately.
-CLI_VERSION = "0.2.0"
+CLI_VERSION = "0.3.0"
 ENGINE_ID = "renpy"
 # Engine versions tested: Ren'Py 7.x (script_version.txt pattern,
 # pyo/py files dated 2019, `from __future__ import print_function`).

@@ -49,13 +49,41 @@ CONTENT = (
     '    menu:\r\n'
     '        "Run away":\r\n'
     '            "You sprint toward the treeline."\r\n'
+    '        "Tea":\r\n'
+    #      ^ one word, no punctuation, no space. The narrator prose
+    #        heuristic rejects this shape, so it is only reachable
+    #        via the structural `menu:` pass. This game's real
+    #        ice-cream branches (Vanilla / Chocolate / Strawberry)
+    #        were lost exactly this way.
+    '            "..."\r\n'
+    #      ^ pure-punctuation silent-dialogue beat. Excluded by the
+    #        number/hex rule unless that rule insists on a digit.
     '        "Stand your ground":\r\n'
     '            "Your head explodes."\r\n'
     '            return\r\n'
     '    return\r\n'
 )
 
+# Units the script.rpy fixture MUST yield, keyed by the literal body
+# `_(...)`/quote pair holds. Guards three extraction gaps that each
+# shipped silently once:
+#   * `renpy.input("...")`  — prompt inside a `$` Python statement
+#   * `"Tea":`             — one-word menu choice
+#   * `"..."`              — punctuation-only dialogue
+EXPECTED_SCRIPT = {
+    "What is your name?": "ui_prompt",
+    "Tea": "menu_option",
+    "...": "narrator",
+    "Run away": "menu_option",
+    "Stand your ground": "menu_option",
+    "Hello there [name].": "dialog",
+}
+
 # A second fixture: a `screens.rpy` with UI labels, also CRLF + BOM.
+# Includes `_("...")` wrapped strings — Ren'Py's explicit
+# translation marker. An earlier extractor skipped these entirely
+# and silently dropped every menu item, so the self-test asserts
+# they are captured.
 SCREENS_CONTENT = (
     '# Test fixture for screens.rpy.\r\n'
     '\r\n'
@@ -67,6 +95,37 @@ SCREENS_CONTENT = (
     'screen about():\r\n'
     '    text "This is a test."\r\n'
     '    text "Version 0.1.0"\r\n'
+    '\r\n'
+    # Non-ASCII BEFORE the strings we assert on. `▸` is one
+    # character but THREE bytes in UTF-8. A `str` regex reports
+    # character offsets; file injection needs byte offsets. If
+    # those are conflated, every entry after this line gets a span
+    # shifted by 2 bytes per `▸`, and inject patches the wrong
+    # range. Keeping this line here makes that bug fail the
+    # self-test instead of corrupting a game.
+    'screen skip_indicator():\r\n'
+    '    text "▸" at delayed_blink(0.0, 1.0)\r\n'
+    '    text "▸" at delayed_blink(0.2, 1.0)\r\n'
+    '\r\n'
+    'screen navigation():\r\n'
+    '    textbutton _("Back") action Rollback()\r\n'
+    '    textbutton _("History") action ShowMenu("history")\r\n'
+    '    textbutton _("Save") action ShowMenu("save")\r\n'
+    '    textbutton _("Quit") action Quit(confirm=False)\r\n'
+    '\r\n'
+    'screen preferences():\r\n'
+    '    label _("Display")\r\n'
+    '    textbutton _("Window") action Preference("display", "window")\r\n'
+    '    textbutton _("Fullscreen") action Preference("display", "fullscreen")\r\n'
+)
+
+# Expected `_("...")` payloads in SCREENS_CONTENT, in source order.
+# The self-test asserts every one is extracted, so a regression in
+# the `_(` pass fails loudly instead of silently shipping an
+# untranslated menu.
+EXPECTED_WRAPPED = (
+    "Back", "History", "Save", "Quit",
+    "Display", "Window", "Fullscreen",
 )
 
 # Minimal valid PNG (1x1 black, 67 bytes after base64 decode).

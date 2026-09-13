@@ -4,6 +4,71 @@ All notable changes to `sirenhead-tool` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-09-13
+
+Found on a real playthrough: the menu was partly untranslated and the
+in-game text was garbled. Both traced back to extraction bugs.
+
+### Fixed
+
+- **Character-vs-byte offset confusion (critical).** A Python `re`
+  match on a `str` reports *character* indices, but a file offset is
+  a *byte* offset. They coincide only for pure ASCII. `screens.rpy`
+  contains `▸` (U+25B8) — one character, three bytes — so every unit
+  after those lines recorded a span shifted by two bytes per arrow.
+  `screens.rpy:304` stored offset 38814 where the true position is
+  38820, i.e. the span read `utton _("` instead of `_("Start")`. The
+  inject source-drift gate caught it (`found 0 bytes at offset …`)
+  and refused to write, so no file was corrupted — but every
+  affected unit would have patched the wrong bytes. Extraction now
+  builds an explicit character→byte map and all offsets are in real
+  file coordinates.
+- **Line numbers were roughly doubled.** `_line_for_offset` kept a
+  counter *and* added the loop index, so a string on line 29 was
+  reported as `L0055`. The id and the `source_context.line` shown to
+  translators were both wrong. Replaced with a `bisect` over the
+  line-start table.
+- **`gallate.yaml`'s `media:` list was ignored.** Extract processed
+  image/audio/video unconditionally, regardless of the declared
+  media list or the `-t/-i/-a/-v` flags. Now: CLI media flags
+  override the YAML list completely (docs/shell-layer/04 § 4.5);
+  with neither, only text is extracted. Verified with a per-kind
+  gate test matrix.
+
+### Added
+
+- **`_("...")` extraction pass.** This is Ren'Py's explicit
+  translation marker and the idiomatic way a game flags UI text.
+  Earlier versions matched only `textbutton "Back"` and therefore
+  silently dropped **every one of the 106** `_()` strings in
+  `screens.rpy`: the whole navigation menu, preferences, help text,
+  and the about page. A game could extract "successfully", report
+  106 units, and still ship an entirely English UI.
+- **`menu:` option pass (structural).** A `menu` branch label is an
+  indented string followed by `:`, which is unambiguous grammar — so
+  these are matched structurally and bypass the narrator prose
+  heuristic. That heuristic rejects single words with no
+  punctuation, which had dropped `"Vanilla"`, `"Chocolate"` and
+  `"Strawberry"` — all three ice-cream endings.
+- **`renpy.input(...)` / `renpy.notify(...)` pass.** Player-facing
+  prompts sit inside a `$` Python statement, where no say / narrator
+  / menu rule reaches them. `"What's your name?"` was lost this way.
+- **Punctuation-only dialogue.** A line that is just `"..."` is a
+  silent-dialogue beat; the decimal/hex exclusion treated three dots
+  as a numeric constant and dropped it.
+- New unit kinds: `wrapped_text`, `menu_option`, `ui_prompt`.
+- Self-test **Test 7** (extraction completeness for `_()` + byte-span
+  integrity + line numbers) and **Test 8** (the three silent-drop
+  gaps). The `screens.rpy` fixture now carries a multi-byte `▸`
+  before the asserted strings, so an offset regression fails loudly.
+
+### Changed
+
+- `features.media.image` / `audio` / `video` are now `true`, and
+  `manifest.targets.formats` lists the media extensions and
+  directories — both were stale from the text-only era.
+- README documents the sub-media defaults and how to override them.
+
 ## [0.2.0] — 2026-09-13
 
 ### Added

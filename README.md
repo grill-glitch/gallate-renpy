@@ -63,7 +63,7 @@ sirenhead-tool --version
 Expected output:
 
 ```text
-sirenhead 0.1.0
+sirenhead 0.3.0
 protocol gcwp 1.0
 engine renpy (7.x compatible)
 ```
@@ -168,6 +168,33 @@ engine:
   audio:
     excludes: [sfx]    # don't ship translation sidecars for SFX
 ```
+
+## What gets extracted
+
+Ren'Py has several distinct places a player-visible string can live,
+and each needs its own rule. All of these are handled:
+
+| Source shape | Example | Unit kind |
+| --- | --- | --- |
+| Character dialogue | `c "Hello there."` | `dialog` |
+| Narrator line | `"Suddenly...Out of nowhere..."` | `narrator` |
+| Silent-dialogue beat | `"..."` | `narrator` |
+| `menu:` choice, multi-word | `"Run away":` | `menu_option` |
+| `menu:` choice, one word | `"Vanilla":` | `menu_option` |
+| Player prompt / notify | `$ n = renpy.input("What's your name?")` | `ui_prompt` |
+| `_()`-wrapped UI text | `textbutton _("Back")` | `wrapped_text` |
+| Screen text | `text "About"` | `screen_text` |
+
+Deliberately **not** extracted: image/audio/video filenames, Ren'Py
+substitutions (`[name]`, `[config.version]`), config values in
+`gui.rpy` / `options.rpy`, `if name == "Jack"` input comparisons,
+keyboard key names (`Ctrl`, `Tab`), and date format strings.
+
+Two of these were silent failures once and are now regression-tested
+(Test 7 and Test 8 in `tests/self_test.py`): the `_()` marker — which
+is how Ren'Py actually flags UI text, so missing it drops an entire
+menu while extract still reports success — and one-word `menu:`
+choices, which the narrator prose heuristic rejects.
 
 ## Guarantees (verified by `python -m tests.self_test`)
 

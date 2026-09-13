@@ -59,6 +59,7 @@ authoritative path.
 
 from __future__ import annotations
 
+import bisect
 import re
 import subprocess
 import sys
@@ -111,6 +112,77 @@ _SCREEN_TEXT_RE = re.compile(
     [ \t]+
     (?P<text>{_STRING_BODY})
     [ \t]*(?::|(?:\r?\n|$))
+    """,
+    re.VERBOSE,
+)
+
+# Ren'Py's explicit translation marker: `_("...")`.
+#
+# This is THE idiomatic way a Ren'Py game marks UI text for
+# localization, e.g.
+#
+#     textbutton _("Back") action Rollback()
+#     text _("Version [config.version!t]\n")
+#     label _("Display")
+#
+# It appears in `screens.rpy` (menu labels, preferences, help
+# text) and can appear in any `.rpy`. Skipping it — as an earlier
+# version of this extractor did — silently drops every menu item
+# in the game, which is exactly the class of bug the
+# gallate-engine-cli skill warns about ("99% right is still a
+# silent failure").
+#
+# The negative lookbehind `(?<![A-Za-z0-9_])` keeps the `_` from
+# matching the tail of a longer identifier (`foo_("x")`), and the
+# byte span covers `_("...")` so inject replaces the literal in
+# place while leaving `_(` and `)` untouched.
+_TRANSLATION_WRAP_RE = re.compile(
+    rf"""
+    (?<![A-Za-z0-9_])
+    _\(
+    (?P<text>{_STRING_BODY})
+    \)
+    """,
+    re.VERBOSE,
+)
+
+# A `menu:` branch label — an indented string literal followed by
+# `:` (optionally guarded by `if <cond>`) at end of line:
+#
+#     menu:
+#         "Vanilla":
+#             c "Vanilla please!"
+#
+# This is unambiguous Ren'Py grammar, so these are matched
+# STRUCTURALLY and skip the `_looks_like_dialog` prose heuristic.
+# That heuristic exists to keep `style_prefix "choice"` and friends
+# out, but it also rejects legitimate one-word choices like
+# "Vanilla" — which is how every ice-cream branch in this game was
+# silently dropped from the first extraction pass.
+_MENU_OPTION_RE = re.compile(
+    rf"""
+    ^[ \t]+
+    (?P<text>{_STRING_BODY})
+    [ \t]*
+    (?:if[ \t]+[^:\r\n]+)?
+    :
+    [ \t]*(?:\r?\n|$)
+    """,
+    re.MULTILINE | re.VERBOSE,
+)
+
+# Strings passed to `renpy.input(...)` / `renpy.notify(...)` — the
+# player-facing prompt/notification APIs. These sit inside a `$`
+# Python statement, so no say/narrator/menu rule sees them.
+#
+#     $ name = renpy.input("What's your name?")
+#
+# The span ends at the string's closing quote, so inject rewrites
+# the literal and leaves the call intact.
+_RENPY_UI_CALL_RE = re.compile(
+    rf"""
+    renpy\.(?:input|notify)\s*\(\s*
+    (?P<text>{_STRING_BODY})
     """,
     re.VERBOSE,
 )
@@ -170,26 +242,43 @@ _ASSIGNMENT_LINE_RE = re.compile(rf"[ \t]*{_IDENT}(?:\.{_IDENT})*[ \t]*=[ \t]*{_
 # punctuation, no digits, no escape) are config values.
 def _looks_like_dialog(body: str) -> bool:
     body = body.strip()
-    if len(body) < 4:
+    if not body:
         return False
-    # Must contain a "word" — at least 2 letters in a row.
+    # Hex colors / decimal constants are excluded — but require at
+    # least one DIGIT, or a bare "..." (all dots, and `.` is in the
+    # class to cover decimals/hex) would be misread as a number and
+    # this game's silent-dialogue beats would be dropped.
+    if re.search(r"\d", body) and re.fullmatch(r"[\d.#\s]+", body):
+        return False
+    # Pure filenames (with path separators or extensions).
+    if body.startswith("/") or body.endswith(
+        (".png", ".jpg", ".ogg", ".wav", ".ogv", ".ttf", ".otf")
+    ):
+        return False
+
     if not re.search(r"[A-Za-z]{2,}", body):
-        return False
-    # Hex colors / pure numbers / dotted identifiers are excluded.
-    if re.fullmatch(r"[\d.#A-Fa-f\s]+", body):
-        return False
-    # Pure filenames (with path separators or dots in odd places).
-    if body.startswith("/") or body.endswith((".png", ".jpg", ".ogg", ".wav", ".ogv", ".ttf", ".otf")):
-        return False
+        # No word at all. Accept only when the body also contains no
+        # ASCII LETTER — i.e. it is pure punctuation / symbols such
+        # as "..." or "……", which are legitimate silent-dialogue
+        # lines this game uses between beats. Anything containing a
+        # letter (even one) is an identifier-style config value, and
+        # the number/hex rule above already rejected bare numerics.
+        if re.search(r"[A-Za-z]", body):
+            return False
+        return True
+
     # Single short-word / camelCase identifiers used as property
     # values in `screens.rpy`: `style_prefix "choice"`,
     # `background "gui/..."`, `id "window"`, etc. These pass the
     # rules above but are NOT dialog. The signal: real dialog
     # always has at least one of: a space inside the body, an
-    # apostrophe, a punctuation mark, or runs of more than one
-    # word. Single-word / camelCase identifiers under ~24 chars
-    # are config unless they contain a space or a `[name]`-style
-    # substitution.
+    # apostrophe, a punctuation mark, a `[name]`-style
+    # substitution, or an ellipsis.
+    #
+    # NOTE: one-word `menu:` choices like "Vanilla" are also
+    # rejected here — that is deliberate. They are recovered by
+    # the structural `_MENU_OPTION_RE` pass, which runs earlier and
+    # claims the span first, so no legitimate choice is lost.
     has_space = " " in body
     has_punct = bool(re.search(r"[,;:.?!'\"]", body))
     has_substitution = bool(re.search(r"\[[a-z_][a-z0-9_.]*\]", body))
@@ -243,6 +332,31 @@ class ExtractedString:
         return self.text
 
 
+def _char_byte_map(text: str) -> list[int]:
+    """Map every character index in `text` to its byte offset in UTF-8.
+
+    Python 3 regex on a `str` reports CHARACTER offsets; a file
+    offset is a BYTE offset. They coincide only for pure ASCII.
+    A single `▸` (U+25B8) is one character but three bytes, so
+    every match after it drifts by two bytes per occurrence.
+    SirenHead's `screens.rpy` has three `text "▸"` lines, which
+    shifted all later offsets by six bytes — inject's source-drift
+    gate caught it (`found 0 bytes at offset ...`) and refused to
+    write, but every affected unit would have patched the wrong
+    span.
+
+    Returns a list of length len(text)+1; the final entry is the
+    total byte length.
+    """
+    out = [0] * (len(text) + 1)
+    n = 0
+    for i, ch in enumerate(text):
+        out[i] = n
+        n += len(ch.encode("utf-8"))
+    out[len(text)] = n
+    return out
+
+
 def _line_starts(data: bytes) -> list[int]:
     """Return byte offsets of the first byte of every line.
 
@@ -261,14 +375,25 @@ def _line_starts(data: bytes) -> list[int]:
 def _line_for_offset(starts: list[int], offset: int) -> tuple[int, int]:
     """Return (1-based line number, 1-based column index) for a byte offset.
 
-    Linear scan — this game is small.
+    `starts[i]` is the byte offset of line i+1, and starts has a
+    trailing `len(data)` sentinel. The line containing `offset` is
+    the last i with starts[i] <= offset.
+
+    Bug history: this used to be a hand-rolled scan that
+    double-counted (`line + i`, where `line` was already being
+    incremented each iteration). Every reported line number was
+    roughly doubled, so ids read `script.rpy:L0055` for a string
+    actually on line 29. Injection was unaffected (it uses
+    source_offset/source_length), but the id and the
+    source_context.line shown to translators were wrong.
     """
-    line = 1
-    for i in range(len(starts) - 1):
-        if starts[i + 1] > offset:
-            return line + i, (offset - starts[i]) + 1
-        line += 1
-    return line, 1
+    i = bisect.bisect_right(starts, offset) - 1
+    if i < 0:
+        i = 0
+    # Clamp: the trailing sentinel can push i past the last real line.
+    if i >= len(starts) - 1:
+        i = max(0, len(starts) - 2)
+    return i + 1, (offset - starts[i]) + 1
 
 
 def _decode_with_bom(raw: bytes) -> tuple[str, int]:
@@ -307,116 +432,186 @@ def _extract_one_file(path: Path) -> list[ExtractedString]:
         return []
 
     raw = path.read_bytes()
-    starts = _line_starts(raw)
     text, bom = _decode_with_bom(raw)
+    # Line starts must be in the SAME coordinate space as the regex
+    # offsets (`m.start()`), which index into `text` — i.e. with the
+    # BOM already stripped. Building this from `raw` shifts every
+    # offset by `bom` bytes and lands matches on the previous line
+    # whenever they start within the first `bom` columns.
+    #
+    # For UTF-8 (what Ren'Py ships) `raw[bom:]` is byte-identical to
+    # `text.encode("utf-8")`, so offsets line up exactly. For UTF-16
+    # (not expected from Ren'Py 7) this would not hold; the decode
+    # path already marks that as best-effort.
+    starts = _line_starts(raw[bom:])
+    # Character index -> byte offset. Regex on `str` reports
+    # character offsets; the file needs byte offsets. See
+    # `_char_byte_map` for why this matters.
+    bmap = _char_byte_map(text)
 
     found: list[ExtractedString] = []
-    # Track closing-quote byte offsets. Two matches that share a
-    # closing quote target the same quoted string; we keep the
-    # first (more specific) and drop later overlaps. This prevents
-    # `label "..."` being captured as both `screen_text` (full line)
-    # and `narrator` (just the quoted body).
+    # Track closing offsets so two passes can't both claim the same
+    # quoted literal (`label "..."` as both `screen_text` and
+    # `narrator`). Offsets are in raw-file byte coordinates.
     closing_offsets: set[int] = set()
 
-    # Pre-compute assignment-line byte ranges. A bare-string match
-    # whose start offset falls inside an assignment is rejected —
-    # that's the RHS of an `=`, not dialog.
+    def _span(m: "re.Match[str]") -> tuple[int, int, int, int]:
+        """(offset, length, line, column) in raw-file byte coords."""
+        b0 = bmap[m.start()]
+        b1 = bmap[m.end()]
+        line, col = _line_for_offset(starts, b0)
+        return b0 + bom, b1 - b0, line, col
+
+    # Pre-compute assignment-line ranges. A bare-string match whose
+    # start falls inside an assignment is the RHS of an `=`, not
+    # dialog. Both sides here are character offsets, so they compare
+    # consistently.
     assignment_ranges: list[tuple[int, int]] = []
     for m in _ASSIGNMENT_LINE_RE.finditer(text):
-        assignment_ranges.append((m.start(), m.end()))
+        assignment_ranges.append((bmap[m.start()], bmap[m.end()]))
 
-    def _in_assignment(off: int) -> bool:
+    def _in_assignment(byte_off: int) -> bool:
         for lo, hi in assignment_ranges:
-            if lo <= off < hi:
+            if lo <= byte_off < hi:
                 return True
         return False
+
+    # Pass 0: `_("...")` — Ren'Py's explicit translation marker.
+    # Must run BEFORE the other passes: a line like
+    # `textbutton _("Back")` would otherwise be skipped entirely
+    # (the screen-text regex wants a bare `"..."` after the
+    # keyword), and running first guarantees the more specific
+    # form wins the closing-offset dedup.
+    for m in _TRANSLATION_WRAP_RE.finditer(text):
+        off, ln, line, col = _span(m)
+        if off + ln in closing_offsets:
+            continue
+        found.append(
+            ExtractedString(
+                file=path,
+                line=line,
+                column=col,
+                offset=off,
+                length=ln,
+                text=m.group(0),
+                kind="wrapped_text",
+                speaker=None,
+            )
+        )
+        closing_offsets.add(off + ln)
+
+    # Pass 0.5: `menu:` branch labels — structural, so one-word
+    # choices survive. Runs before the narrator pass so it claims
+    # the span; the narrator prose heuristic would reject "Vanilla".
+    for m in _MENU_OPTION_RE.finditer(text):
+        off, ln, line, col = _span(m)
+        if off + ln in closing_offsets:
+            continue
+        found.append(
+            ExtractedString(
+                file=path,
+                line=line,
+                column=col,
+                offset=off,
+                length=ln,
+                text=m.group(0),
+                kind="menu_option",
+                speaker=None,
+            )
+        )
+        closing_offsets.add(off + ln)
+
+    # Pass 0.6: `renpy.input(...)` / `renpy.notify(...)` prompts.
+    for m in _RENPY_UI_CALL_RE.finditer(text):
+        off, ln, line, col = _span(m)
+        if off + ln in closing_offsets:
+            continue
+        found.append(
+            ExtractedString(
+                file=path,
+                line=line,
+                column=col,
+                offset=off,
+                length=ln,
+                text=m.group(0),
+                kind="ui_prompt",
+                speaker=None,
+            )
+        )
+        closing_offsets.add(off + ln)
 
     # Pass 1: speaker dialog.
     for m in _SAY_RE.finditer(text):
         speaker = m.group("char")
         if speaker in _RESERVED_PREFIX:
             continue
-        # Skip if the closing-quote byte is already taken by an
-        # earlier match. Pass 1 runs first, so it always wins.
-        if m.end() in closing_offsets:
+        off, ln, line, col = _span(m)
+        if off + ln in closing_offsets:
             continue
-        line, col = _line_for_offset(starts, m.start())
         found.append(
             ExtractedString(
                 file=path,
                 line=line,
                 column=col,
-                offset=m.start(),
-                length=m.end() - m.start(),
+                offset=off,
+                length=ln,
                 text=m.group(0),
                 kind="dialog",
                 speaker=speaker,
             )
         )
-        closing_offsets.add(m.end())
+        closing_offsets.add(off + ln)
 
     # Pass 2: screen text.
     for m in _SCREEN_TEXT_RE.finditer(text):
-        if _in_assignment(m.start()):
+        off, ln, line, col = _span(m)
+        if _in_assignment(off):
             continue
-        if m.end() in closing_offsets:
+        if off + ln in closing_offsets:
             continue
-        line, col = _line_for_offset(starts, m.start())
         found.append(
             ExtractedString(
                 file=path,
                 line=line,
                 column=col,
-                offset=m.start(),
-                length=m.end() - m.start(),
+                offset=off,
+                length=ln,
                 text=m.group(0),
                 kind="screen_text",
                 speaker=None,
             )
         )
-        closing_offsets.add(m.end())
+        closing_offsets.add(off + ln)
 
     # Pass 3: narrator (indented bare string). Apply the dialog
     # heuristic to the body and the assignment-line filter. Also
-    # skip if any earlier match (Pass 1 OR Pass 2) already covers
-    # this byte offset — that prevents double-counting
-    # `text "..."` as both `screen_text` and `narrator` on the
-    # same byte range.
+    # skip if an earlier pass already claimed this byte offset.
     for m in _NARRATOR_RE.finditer(text):
-        if _in_assignment(m.start()):
+        off, ln, line, col = _span(m)
+        if _in_assignment(off):
             continue
-        if any(s.offset == m.start() for s in found):
+        if any(s.offset == off for s in found):
             continue
-        if m.end() in closing_offsets:
+        if off + ln in closing_offsets:
             continue
         body = m.group("text")[1:-1]  # strip outer quotes
         if not _looks_like_dialog(body):
             continue
-        line, col = _line_for_offset(starts, m.start())
         found.append(
             ExtractedString(
                 file=path,
                 line=line,
                 column=col,
-                offset=m.start(),
-                length=m.end() - m.start(),
+                offset=off,
+                length=ln,
                 text=m.group(0),
                 kind="narrator",
                 speaker=None,
             )
         )
-        closing_offsets.add(m.end())
+        closing_offsets.add(off + ln)
 
     found.sort(key=lambda s: s.offset)
-    # All regex offsets are in `text` (BOM-stripped). Convert them
-    # back to raw-file offsets so inject reads from `raw` directly.
-    # Ren'Py 7 ships .rpy files with a UTF-8 BOM, so `bom` is 3 for
-    # those files. We shift `offset` AND `length` (length stays the
-    # same; the closing-offset set already records raw byte ends,
-    # so it shifts too).
-    if bom:
-        for s in found:
-            s.offset += bom
     return found
 
 

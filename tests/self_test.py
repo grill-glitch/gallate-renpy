@@ -514,6 +514,171 @@ def main() -> int:
         _fails += 1
 
     # ------------------------------------------------------------------
+    # Test 7: extraction completeness — `_("...")` wrapped UI text.
+    #
+    # Regression guard. An earlier extractor matched only
+    # `textbutton "..."` and skipped `textbutton _("Back")` — which
+    # is how Ren'Py actually marks UI text for translation. The
+    # result was a silently untranslated menu: extract "succeeded",
+    # self-tests passed, and every button stayed English.
+    #
+    # Also asserts line numbers against the fixture source, because
+    # a separate bug reported roughly-doubled line numbers (a
+    # byte-offset coordinate-space mismatch: regex offsets are
+    # BOM-stripped, the line table was not).
+    # ------------------------------------------------------------------
+    print("\n=== TEST 7: extraction completeness (`_(...)` UI + line numbers) ===")
+    fresh_project(project, game_dir)
+    (project / "gallate.yaml").write_text(
+        f"input: {game_dir}\nmedia:\n  - text\n",
+        encoding="utf-8",
+    )
+    rc, out, err = run_tool("-et", str(project / "gallate.yaml"))
+    if not check(rc == 0, "extract for Test 7 returns 0", err[:200]):
+        _fails += 1
+    else:
+        from .fixtures import EXPECTED_WRAPPED, SCREENS_CONTENT
+        screens_unit = project / "text" / "units" / "screens.json"
+        if not check(screens_unit.is_file(),
+                     "screens.json produced from fixture"):
+            _fails += 1
+        else:
+            doc = json.loads(screens_unit.read_text(encoding="utf-8"))
+            sources = {e["source"] for e in doc["entries"]}
+            missing = [w for w in EXPECTED_WRAPPED if w not in sources]
+            if not check(not missing,
+                         f"all {len(EXPECTED_WRAPPED)} `_(...)` payloads extracted",
+                         f"missing: {missing}"):
+                _fails += 1
+            # Every entry's recorded byte span must actually contain
+            # its `source` at the right place. This is the assertion
+            # that catches offset drift: if the extractor mixes
+            # character offsets (from a `str` regex) with byte
+            # offsets (the file), the span slides and inject would
+            # patch the wrong bytes. The fixture deliberately places
+            # a multi-byte `▸` before the strings under test.
+            src_bytes = (game_dir / "screens.rpy").read_bytes()
+            bad_spans: list[str] = []
+            for e in doc["entries"]:
+                off = e["metadata"]["source_offset"]
+                ln = e["metadata"]["source_length"]
+                span = src_bytes[off:off + ln]
+                # The quoted literal inside the span must equal
+                # the entry's source, byte for byte.
+                try:
+                    q1 = span.index(b'"')
+                    q2 = span.rindex(b'"')
+                    inside = span[q1 + 1:q2]
+                except ValueError:
+                    bad_spans.append(f"{e['id']}: no quote pair in {span!r}")
+                    continue
+                if inside != e["source"].encode("utf-8"):
+                    bad_spans.append(
+                        f"{e['id']}: span holds {inside!r}, "
+                        f"source is {e['source']!r}"
+                    )
+            if not check(not bad_spans,
+                         f"all {len(doc['entries'])} byte spans hold their source",
+                         f"bad: {bad_spans[:3]}"):
+                _fails += 1
+            # And specifically: the wrapped entries must still sit
+            # inside a `_(...)` call.
+            ok_spans = True
+            for e in doc["entries"]:
+                if e["source"] not in EXPECTED_WRAPPED:
+                    continue
+                off = e["metadata"]["source_offset"]
+                ln = e["metadata"]["source_length"]
+                span = src_bytes[off:off + ln]
+                if not (span.startswith(b'_("') and span.endswith(b'")')):
+                    ok_spans = False
+                    print(f"    bad wrap span for {e['id']}: {span!r}")
+                    break
+            if not check(ok_spans,
+                         'wrapped entries\' byte spans cover `_("...")`'):
+                _fails += 1
+            # Line-number spot check against the fixture source.
+            content_lines = SCREENS_CONTENT.split("\r\n")
+            expected_line = next(
+                (i + 1 for i, ln in enumerate(content_lines)
+                 if '_("Back")' in ln), None,
+            )
+            got_line = next(
+                (e["source_context"]["line"] for e in doc["entries"]
+                 if e["source"] == "Back"), None,
+            )
+            if not check(got_line == expected_line,
+                         f"line number for 'Back' is {expected_line} "
+                         f"(got {got_line})"):
+                _fails += 1
+
+    # ------------------------------------------------------------------
+    # Test 8: the three "silent drop" extraction gaps.
+    #
+    # Each of these shipped once with extract reporting success:
+    #   * `renpy.input("...")` — the prompt lives inside a `$` Python
+    #     statement, so no say/narrator/menu rule reaches it.
+    #   * a one-word `menu:` choice ("Tea", "Vanilla") — the narrator
+    #     prose heuristic rejects single words with no punctuation,
+    #     so every ice-cream branch vanished.
+    #   * a punctuation-only line ("...") — the number/hex exclusion
+    #     treated three dots as a numeric constant.
+    # ------------------------------------------------------------------
+    print("\n=== TEST 8: silent-drop extraction gaps ===")
+    fresh_project(project, game_dir)
+    (project / "gallate.yaml").write_text(
+        f"input: {game_dir}\nmedia:\n  - text\n",
+        encoding="utf-8",
+    )
+    rc, out, err = run_tool("-et", str(project / "gallate.yaml"))
+    if not check(rc == 0, "extract for Test 8 returns 0", err[:200]):
+        _fails += 1
+    else:
+        import re as _re
+        from .fixtures import EXPECTED_SCRIPT
+        unit = project / "text" / "units" / "script.json"
+        if not check(unit.is_file(), "script.json produced"):
+            _fails += 1
+        else:
+            doc = json.loads(unit.read_text(encoding="utf-8"))
+
+            def _body(t: str) -> str:
+                m = _re.search(r'"((?:[^"\\]|\\.)*)"', t)
+                return m.group(1) if m else t
+
+            got: dict[str, list[str]] = {}
+            for e in doc["entries"]:
+                # The unit file carries the extractor's kind under
+                # metadata.renpy_kind (set by extract.build_units).
+                kind = e.get("metadata", {}).get("renpy_kind", "?")
+                got.setdefault(_body(e["source"]), []).append(kind)
+            for literal, want_kind in EXPECTED_SCRIPT.items():
+                kinds = got.get(literal, [])
+                if not check(kinds == [want_kind],
+                             f"{literal!r} extracted as {want_kind}",
+                             f"got {kinds or 'nothing'}"):
+                    _fails += 1
+            # And every unit's byte span must still hold its source.
+            src_bytes = (game_dir / "script.rpy").read_bytes()
+            bad = []
+            for e in doc["entries"]:
+                off = e["metadata"]["source_offset"]
+                ln = e["metadata"]["source_length"]
+                span = src_bytes[off:off + ln]
+                try:
+                    q1, q2 = span.index(b'"'), span.rindex(b'"')
+                    inside = span[q1 + 1:q2]
+                except ValueError:
+                    bad.append(f"{e['id']}: no quote pair")
+                    continue
+                if inside != _body(e["source"]).encode("utf-8"):
+                    bad.append(f"{e['id']}: {inside!r} != {_body(e['source'])!r}")
+            if not check(not bad,
+                         f"all {len(doc['entries'])} spans hold their source",
+                         f"bad: {bad[:3]}"):
+                _fails += 1
+
+    # ------------------------------------------------------------------
     # Cleanup.
     # ------------------------------------------------------------------
     print("\n=== CLEANUP ===")

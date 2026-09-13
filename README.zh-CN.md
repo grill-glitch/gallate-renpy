@@ -62,7 +62,7 @@ sirenhead-tool --version
 预期输出：
 
 ```text
-sirenhead 0.1.0
+sirenhead 0.3.0
 protocol gcwp 1.0
 engine renpy (7.x compatible)
 ```
@@ -165,6 +165,32 @@ engine:
   audio:
     excludes: [sfx]    # 不要给音效生成翻译 sidecar
 ```
+
+## 抽取范围
+
+Ren'Py 里玩家可见字符串有若干不同位置，每类的判定规则都不同。
+以下全部覆盖：
+
+| 源形态 | 示例 | unit kind |
+| --- | --- | --- |
+| 角色对白 | `c "Hello there."` | `dialog` |
+| 旁白行 | `"Suddenly...Out of nowhere..."` | `narrator` |
+| 静默对白（省略号） | `"..."` | `narrator` |
+| `menu:` 选项（多词） | `"Run away":` | `menu_option` |
+| `menu:` 选项（单词） | `"Vanilla":` | `menu_option` |
+| 玩家输入/通知提示 | `$ n = renpy.input("What's your name?")` | `ui_prompt` |
+| `_()` 包裹的 UI 文本 | `textbutton _("Back")` | `wrapped_text` |
+| 屏幕文本 | `text "About"` | `screen_text` |
+
+**刻意不抽取**：图/音/视频文件名、Ren'Py 变量替换（`[name]`、
+`[config.version]`）、`gui.rpy` / `options.rpy` 里的配置值、
+`if name == "Jack"` 这类输入比较、键盘按键名（`Ctrl`、`Tab`）、
+日期格式串。
+
+其中两类曾经**静默失败**，现已加回归测试（`tests/self_test.py`
+的 Test 7 / Test 8）：`_()` 标记——Ren'Py 实际用它标记 UI 文本，
+漏掉它会让整个菜单未翻译而抽取仍报告成功；以及单词 `menu:` 选项
+——会被旁白散文启发式拒掉。
 
 ## 保证（由 `python -m tests.self_test` 验证）
 

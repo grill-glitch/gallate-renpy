@@ -433,6 +433,7 @@ def extract_media(
     audio_excludes: set[str] | None = None,
     video_includes: set[str] | None = None,
     video_excludes: set[str] | None = None,
+    enabled: dict[str, bool] | None = None,
 ) -> tuple[MediaInventory, dict[str, list[Path]]]:
     """Extract media from `game_root` into `project_root`.
 
@@ -446,21 +447,47 @@ def extract_media(
     and copies the user-supplied replacement file over the
     original. Round-trip is byte-identical when no targets are
     set.
-    """
-    refs = _scan_script_refs(game_root)
-    inv = _classify_all(game_root, refs)
 
-    inv.images = _filter_sub_media(inv.images, image_includes, image_excludes)
-    inv.audios = _filter_sub_media(inv.audios, audio_includes, audio_excludes)
-    inv.videos = _filter_sub_media(inv.videos, video_includes, video_excludes)
+    `enabled` is a per-kind switch (`{"image": True, ...}`); when
+    any value is `False`, that kind's assets are not classified,
+    no sidecars are written, and `.meta.json` is not populated
+    for them. Defaults to "all kinds enabled" when omitted.
+    """
+    if enabled is None:
+        enabled = {"image": True, "audio": True, "video": True}
 
     by_kind: dict[str, list[Path]] = {"image": [], "audio": [], "video": []}
-    for asset in inv.images:
-        by_kind["image"].append(_write_sidecar(asset, project_root))
-    for asset in inv.audios:
-        by_kind["audio"].append(_write_sidecar(asset, project_root))
-    for asset in inv.videos:
-        by_kind["video"].append(_write_sidecar(asset, project_root))
+    inv = MediaInventory(images=[], audios=[], videos=[])
+    if not any(enabled.values()):
+        return inv, by_kind
+
+    refs = _scan_script_refs(game_root)
+    full = _classify_all(game_root, refs)
+
+    if enabled.get("image"):
+        inv.images = _filter_sub_media(
+            full.images, image_includes, image_excludes
+        )
+        for asset in inv.images:
+            by_kind["image"].append(
+                _write_sidecar(asset, project_root)
+            )
+    if enabled.get("audio"):
+        inv.audios = _filter_sub_media(
+            full.audios, audio_includes, audio_excludes
+        )
+        for asset in inv.audios:
+            by_kind["audio"].append(
+                _write_sidecar(asset, project_root)
+            )
+    if enabled.get("video"):
+        inv.videos = _filter_sub_media(
+            full.videos, video_includes, video_excludes
+        )
+        for asset in inv.videos:
+            by_kind["video"].append(
+                _write_sidecar(asset, project_root)
+            )
     return inv, by_kind
 
 
