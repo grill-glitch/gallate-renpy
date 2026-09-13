@@ -13,7 +13,7 @@ const (
 	CLIName = "Siren Head Dating Sim CLI"
 
 	// CLIVersion is the CLI semantic version.
-	CLIVersion = "0.4.0"
+	CLIVersion = "0.5.0"
 
 	// EngineID is the stable engine identifier.
 	EngineID = "renpy"
@@ -50,6 +50,8 @@ Usage:
   ` + CLIID + ` -e[media] ./gallate.yaml [options]   Extract translation units
   ` + CLIID + ` -i[media] ./gallate.yaml [options]   Inject translated units
   ` + CLIID + ` init [target] [options]              Initialize a project
+  ` + CLIID + ` unpack <archive.rpa> <dir> [options] Unpack an .rpa archive
+  ` + CLIID + ` repack <dir> <archive.rpa> [options] Pack a directory into .rpa
   ` + CLIID + ` manifest                             Print CLI manifest (GCWP)
   ` + CLIID + ` features                             Print CLI features (GCWP)
   ` + CLIID + ` validation                           Print validation rules

@@ -69,6 +69,10 @@ func Run(argv []string, in io.Reader, out, errOut io.Writer, interactive bool) i
 		return doExtractShell(args, out, errOut)
 	case args.IsInject:
 		return doInjectShell(args, out, errOut)
+	case args.IsUnpack:
+		return doUnpackShell(args, out, errOut)
+	case args.IsRepack:
+		return doRepackShell(args, out, errOut)
 	}
 	fmt.Fprintf(errOut, "%s: no operation specified\n", CLIID)
 	return ExitUsage
@@ -224,4 +228,97 @@ func dedupStrings(items []string) []string {
 		out = append(out, it)
 	}
 	return out
+}
+
+// doUnpackShell implements `tool unpack <archive.rpa> <dir>`.
+//
+// The Shell-layer contract is the same as for extract/inject:
+// stdout carries only the result path; stderr carries progress,
+// warnings, and the final summary; the exit code follows the
+// Shell-layer table (ExitExtractionFailure on archive error,
+// ExitOutputFailure on write failure, ExitOK on success).
+//
+// The archive is independent of `gallate.yaml` (it lives at the
+// game root, not inside the project tree), so we deliberately do
+// not resolve paths against Project Root.
+func doUnpackShell(args *Args, out, errOut io.Writer) int {
+	rep := &Reporter{Stderr: errOut, Quiet: args.Quiet, Verbose: args.Verbose}
+	rep.phase("scanning")
+	if !fileExists(args.SubSrc) {
+		return reportError(exitErr(ExitInputNotFound,
+			fmt.Sprintf("archive not found: %s", args.SubSrc)), errOut)
+	}
+	arc, err := openArchive(args.SubSrc)
+	if err != nil {
+		return reportError(exitErr(ExitExtractionFailure,
+			fmt.Sprintf("cannot open RPA archive: %v", err)), errOut)
+	}
+	rep.phase("extracting")
+	rules, err := compileIgnore(args.Ignore)
+	if err != nil {
+		return reportError(exitErr(ExitUsage, err.Error()), errOut)
+	}
+	stats, err := arc.extractAll(args.SubDst, rep, rules)
+	if err != nil {
+		return reportError(exitErr(ExitOutputFailure, err.Error()), errOut)
+	}
+	if !args.DryRun {
+		writeManifest(args.SubSrc, args.SubDst, arc)
+		rep.note("unpacked %d file(s) (%d bytes) from %s",
+			stats.FilesProcessed, stats.BytesWritten, args.SubSrc)
+	} else {
+		rep.note("dry run: %d file(s) would be created in %s; nothing written",
+			len(arc.entries), args.SubDst)
+	}
+	fmt.Fprintf(out, "%s\n", args.SubDst)
+	return ExitOK
+}
+
+// doRepackShell implements `tool repack <dir> <archive.rpa>`.
+//
+// The packer reads every file under the source directory (in
+// sorted order, so the metadata is stable), assigns offsets in
+// that order, and writes the metadata at the end. The XOR key
+// defaults to "42424242" — the value Ren'Py 7+ writes by default
+// and what every Ren'Py-packaged game we have seen uses. Override
+// with `--engine.rpa-key=HEXHEXHEX`.
+func doRepackShell(args *Args, out, errOut io.Writer) int {
+	rep := &Reporter{Stderr: errOut, Quiet: args.Quiet, Verbose: args.Verbose}
+	rep.phase("scanning")
+	if !dirExists(args.SubSrc) {
+		return reportError(exitErr(ExitInputNotFound,
+			fmt.Sprintf("source directory not found: %s", args.SubSrc)), errOut)
+	}
+	if !args.DryRun && fileExists(args.SubDst) && !args.Force {
+		return reportError(exitErr(ExitUsage,
+			fmt.Sprintf("output already exists: %s (use --force to overwrite)", args.SubDst)), errOut)
+	}
+	key := defaultRPAKey
+	if v, ok := args.EngineOpts["rpa-key"]; ok && v != "" {
+		parsed, err := readHexKey(v)
+		if err != nil {
+			return reportError(exitErr(ExitUsage, err.Error()), errOut)
+		}
+		key = parsed
+	}
+	rep.phase("writing")
+	stats, err := PackDir(args.SubSrc, args.SubDst, key, rep, args.Ignore)
+	if err != nil {
+		// PackDir returns plain errors; map them to the right exit
+		// code. Output-side errors (Create, Write) become
+		// ExitOutputFailure; everything else (e.g. an invalid key
+		// mid-run, which compileIgnore already catches) is general.
+		return reportError(exitErr(ExitOutputFailure, err.Error()), errOut)
+	}
+	if args.DryRun {
+		// PackDir still wrote stats, but we want no side effects.
+		_ = os.Remove(args.SubDst)
+		rep.note("dry run: %d file(s) would be packed into %s; nothing written",
+			stats.FilesProcessed, args.SubDst)
+	} else {
+		rep.note("packed %d file(s) (%d bytes) into %s (key=%s)",
+			stats.FilesProcessed, stats.BytesWritten, args.SubDst, key)
+	}
+	fmt.Fprintf(out, "%s\n", args.SubDst)
+	return ExitOK
 }

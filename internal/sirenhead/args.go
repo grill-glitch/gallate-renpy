@@ -47,6 +47,14 @@ type Args struct {
 	IsValidation bool
 	IsExtract    bool
 	IsInject     bool
+	IsUnpack     bool
+	IsRepack     bool
+
+	// Subcommand positionals (unpack/repack).
+	// Unpack: SrcPath is the .rpa file; OutDir is the destination directory.
+	// Repack: SrcDir is the input directory; OutPath is the .rpa output file.
+	SubSrc string
+	SubDst string
 
 	// Operation scope.
 	ProjectRoot string // Project Root: directory holding gallate.yaml
@@ -114,6 +122,15 @@ func Parse(argv []string) (*Args, error) {
 	if len(argv) > 0 && argv[0] == "init" {
 		args.IsInit = true
 		return args, parseInit(argv[1:], args)
+	}
+
+	if len(argv) > 0 && (argv[0] == "unpack" || argv[0] == "repack") {
+		if argv[0] == "unpack" {
+			args.IsUnpack = true
+		} else {
+			args.IsRepack = true
+		}
+		return args, parseArchiveSub(argv[1:], args)
 	}
 
 	// An operation flag is required for every other invocation.
@@ -270,10 +287,75 @@ func parseInit(argv []string, args *Args) error {
 	return nil
 }
 
+// parseArchiveSub parses `tool unpack <archive> <dir> [options]` and
+// `tool repack <dir> <archive> [options]`.
+//
+// Both subcommands take two positionals (source and destination, in
+// that order). They accept the standard `--ignore` and `--dry-run`
+// flags and the engine extension `--engine.rpa-key=KEY` (the 8-char
+// hex XOR key written into the new archive's header).
+//
+// Paths are resolved relative to the shell's current directory (the
+// archive lives outside `gallate.yaml`'s project layout), so this
+// subcommand deliberately does NOT require a project file.
+func parseArchiveSub(argv []string, args *Args) error {
+	if len(argv) < 2 {
+		return usageErr("expected two positionals: <source> <destination>")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return exitErr(ExitGeneral, fmt.Sprintf("cannot determine working directory: %v", err))
+	}
+	resolveCWD := func(p string) string {
+		if filepath.IsAbs(p) {
+			return filepath.Clean(p)
+		}
+		return filepath.Clean(filepath.Join(cwd, p))
+	}
+	args.SubSrc = resolveCWD(argv[0])
+	args.SubDst = resolveCWD(argv[1])
+	argv = argv[2:]
+	for i := 0; i < len(argv); i++ {
+		a := argv[i]
+		switch {
+		case a == "--help" || a == "-h":
+			args.IsHelp = true
+		case a == "--ignore":
+			if i+1 >= len(argv) {
+				return usageErr("--ignore requires a value")
+			}
+			args.Ignore = append(args.Ignore, argv[i+1])
+			i++
+		case a == "--dry-run":
+			args.DryRun = true
+		case a == "--force":
+			args.Force = true
+		case a == "-v" || a == "--verbose":
+			args.Verbose++
+			args.Quiet = false
+		case a == "-q" || a == "--quiet":
+			args.Quiet = true
+			args.Verbose = 0
+		case strings.HasPrefix(a, "--engine."):
+			body := strings.TrimPrefix(a, "--engine.")
+			eq := strings.Index(body, "=")
+			if eq < 0 {
+				return usageErr(fmt.Sprintf("--engine.KEY=VALUE required: %s", a))
+			}
+			args.EngineOpts[body[:eq]] = body[eq+1:]
+		default:
+			return usageErr(fmt.Sprintf("unknown option: %s", a))
+		}
+	}
+	return nil
+}
+
 // UsageText is printed with every usage error.
 func UsageText() string {
 	return "Usage: " + CLIID + " [op][media] ./gallate.yaml [options]\n" +
 		"       " + CLIID + " init [target] [options]\n" +
+		"       " + CLIID + " unpack <archive.rpa> <dir> [options]\n" +
+		"       " + CLIID + " repack <dir> <archive.rpa> [options]\n" +
 		"       " + CLIID + " {manifest|features|validation|--help|--version}\n"
 }
 

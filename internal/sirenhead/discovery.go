@@ -44,6 +44,7 @@ func Manifest() orderedMap {
 					[]any{
 						formatRule(".rpy", "", "file"),
 						formatRule(".rpyc", "", "file"),
+						formatRule(".rpa", "", "file"),
 						formatRule(".png", "", "file"),
 						formatRule(".jpg", "", "file"),
 						formatRule(".wav", "", "file"),
@@ -64,6 +65,16 @@ func Manifest() orderedMap {
 							keys: []string{"offset", "bytes", "encoding", "description"},
 							vals: []any{0, "ef bb bf", "hex",
 								"UTF-8 BOM used by script.rpy"},
+						},
+						orderedMap{
+							keys: []string{"offset", "bytes", "encoding", "description"},
+							vals: []any{0, "52 50 41 2d 33 2e 30 20", "hex",
+								"RPA-3.0 archive header (Ren'Py packed assets)"},
+						},
+						orderedMap{
+							keys: []string{"offset", "bytes", "encoding", "description"},
+							vals: []any{0, "52 50 41 2d 32 2e 30 20", "hex",
+								"RPA-2.0 archive header (legacy Ren'Py archive)"},
 						},
 					},
 				},
@@ -108,8 +119,9 @@ func Features() orderedMap {
 					// runtime; there is no package step for the CLI to
 					// own.
 					false,
-					// This game ships no `.rpa` archives.
-					false,
+					// RPA-3.0 archive unpack/repack (engine-extension).
+					true,
+					true,
 					false,
 					// Engine-extension operations.
 					true,
