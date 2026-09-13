@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sirenhead-tool"
+version = "0.1.0"
+description = "A gallate CLI for Ren'Py game translation. Extract dialog and UI text, translate, inject back — with byte-stable round-trips and source-drift detection."
+readme = "README.md"
+license = {text = "CC-BY-SA-4.0"}
+authors = [
+    {name = "Samuel Flores", email = "5uniljdst@mozmail.com"},
+]
+requires-python = ">=3.9"
+keywords = [
+    "gallate",
+    "renpy",
+    "translation",
+    "localization",
+    "visual-novel",
+    "gcwp",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Creative Commons Attribution-ShareAlike 4.0 International",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Internationalization",
+    "Topic :: Software Development :: Localization",
+    "Topic :: Text Processing :: Markup",
+]
+dependencies = [
+    "pyyaml>=6.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/grill-glitch/gallate-renpy"
+Issues = "https://github.com/grill-glitch/gallate-renpy/issues"
+Spec = "https://github.com/grill-glitch/gallate"
+
+[project.scripts]
+sirenhead-tool = "sirenhead_tool.__main__:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["sirenhead_tool*"]
+
+[tool.setuptools.package-data]
+sirenhead_tool = ["py.typed"]
