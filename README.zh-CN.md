@@ -22,6 +22,10 @@
   -a        audio  引擎扩展媒体（voice / bgm / sfx）
   -v        video  引擎扩展媒体（cutscene / opening / ending）
 
+引擎扩展操作（Ren'Py）：
+  unpack     <archive.rpa> <dir>   解包 RPA-3.0 归档
+  repack     <dir> <archive.rpa>   将目录树打包为 .rpa 归档
+
 发现（按 docs/protocol/03）：
   manifest   CLI 身份（stdout 上的 GCWP JSON）
   features   CLI 能力（stdout 上的 GCWP JSON）
@@ -117,6 +121,35 @@ diff 恰好每条改动一行。
 
 这些键到底写不写，由 `gallate.yaml` 的 `text.metadata.*` 与
 `text.lifecycle.written_on: never` 决定，详见 [gallate.yaml 支持](#gallateyaml-支持)。
+
+## 打包归档（`.rpa`）
+
+Ren'Py 把游戏素材（图、音、字体、`.rpyc` 编译脚本）打成 `.rpa` 归档发布。Ren'Py
+运行时透明加载；本 CLI 的 `extract` / `inject` 需要磁盘文件，所以配两个子命令
+把归档变目录树、再变回去：
+
+```bash
+# 1. 把归档展开成目录树。
+./sirenhead-tool unpack /path/to/game/archive.rpa /tmp/unpacked
+
+# 2. 对展开后的目录树（以及其中的译文副本）跑标准的 extract / inject / build。
+./sirenhead-tool -et /path/to/project/gallate.yaml
+./sirenhead-tool -it /path/to/project/gallate.yaml
+
+# 3. 把（已翻译的）目录树重新打包成新归档。
+./sirenhead-tool repack /tmp/unpacked /path/to/out.rpa
+```
+
+解包器会在目录树旁边写一个 `archive.manifest.json` 审计侧文件（再打包同一目录
+时会自动排除它，避免把 CLI 自己的记账文件嵌进归档）。两个子命令都接受标准
+`--ignore` 与 `--dry-run`；repack 还接受 `--engine.rpa-key=HEXHEXHEX` 覆盖默认
+XOR 密钥（`42424242`，也是 Ren'Py 自己默认的）。
+
+已在四份 DDLC 归档（`fonts` / `scripts` / `audio` / `images`）与 BAD END THEATER
+的 `archive.rpa`（1901 条目）上验证。`unpack` → `repack` 的回环对每个文件都保持
+逐字节一致。
+
+GCWP 包装器用同一组操作：`{"operation":"unpack", ...}` 与 `{"operation":"repack", ...}`。
 
 ## 会抽取什么
 

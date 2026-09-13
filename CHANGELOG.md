@@ -4,6 +4,71 @@ All notable changes to `sirenhead-tool` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-09-13
+
+`unpack` / `repack` engine-extension operations: turn any
+Ren'Py `.rpa` archive into a directory and back, so a
+Wrapper / Wrapper-less workflow can drive `extract → inject`
+on games that ship their assets packed.
+
+### Added
+
+- **`unpack <archive.rpa> <dir>`** (Shell) / **`operation: unpack`**
+  (GCWP). Reads RPA-3.0 archives produced by every Ren'Py 7.x
+  and 8.x release we have encountered (DDLC's `fonts.rpa` /
+  `scripts.rpa` / `audio.rpa` / `images.rpa`, BAD END THEATER's
+  `archive.rpa`), writes one file per entry, and emits an
+  `archive.manifest.json` audit sidecar next to the tree.
+  Supports pickle protocols 2, 4, and 5 (Ren'Py's choice
+  depends on the engine version and the archive's size).
+- **`repack <dir> <archive.rpa>`** (Shell) / **`operation: repack`**
+  (GCWP). Walks the directory in sorted order, XORs the
+  per-entry offsets and lengths with the archive's key
+  (default `42424242`, Ren'Py's own default), compresses the
+  metadata with zlib, and writes the result to disk. A
+  round-trip (`unpack` → `repack` → `unpack`) produces
+  byte-identical files.
+- **Hand-rolled pickle parser** (`internal/sirenhead/rpa.go`).
+  Ren'Py ships a Python 2 cPickle blob that we can't read with
+  Go's stdlib; we implement just enough of the pickle
+  machine — `LONG1`, `BININT`, `SHORT_BINSTRING`, `SHORT_BINBYTES`,
+  `SHORT_BINUNICODE`, `BINUNICODE`, `EMPTY_LIST`, `EMPTY_DICT`,
+  `TUPLE3`, `MARK`, `STOP`, `PROTO`, `FRAME`, `MEMOIZE`,
+  `BINPUT`, `LONG_BINPUT`, `BINGET` — to read every Ren'Py
+  archive variant we have on disk. The wire format is the
+  same one Ren'Py's `loader.py` reads; we follow the same
+  XOR-with-key and incremental-dict (`SETITEMS` repeated
+  every ~1000 entries) rules.
+- **`features.operations.unpack` / `features.operations.repack`**
+  now report `true`. `manifest.targets.formats` now lists
+  `.rpa`; `manifest.targets.magic_bytes` now lists `52 50 41 2d
+  33 2e 30 20` and `52 50 41 2d 32 2e 30 20` so a Wrapper can
+  recognise `.rpa` files without invoking this CLI. The
+  `identify` operation matches `.rpa` files by their magic
+  header at `high` confidence.
+- **`--engine.rpa-key=HEXHEXHEX`** (Shell) / `options["rpa-key"]`
+  (GCWP). Override the default `42424242` XOR key when
+  packing. Reading a key always succeeds; writing an invalid
+  key exits with a usage error.
+- **`archive.manifest.json` audit sidecar**. Written next to
+  every unpacked tree (and re-read by no one — it is for
+  humans and for diff review). Explicitly excluded from a
+  repack of the same directory so a `unpack → repack` round-trip
+  doesn't embed the CLI's own bookkeeping.
+
+### Tested
+
+- All four DDLC `.rpa` archives (`fonts`, `scripts`, `audio`,
+  `images`) — 12 + 42 + 64 + 455 entries respectively.
+- BAD END THEATER `archive.rpa` — 1901 entries spanning
+  pickle protocol 4 with FRAME opcodes.
+- In-repo self-tests: byte-identical round-trip on synthetic
+  fixtures, protocol rejection (0, 1, 3, 6+), bad-magic
+  rejection, audit-sidecar exclusion, header-offset
+  sanity (`0x78 0x9c` zlib magic at the recorded offset).
+- GCWP `unpack` over stdin/stdout against `scripts.rpa` —
+  42 events + statistics + completed message.
+
 ## [0.4.0] — 2026-09-13
 
 Rewritten in Go. One static binary, no Python runtime, no `pip install`.

@@ -23,6 +23,10 @@ Operations:
   -a        audio  (engine-extension: voice / bgm / sfx)
   -v        video  (engine-extension: cutscene / opening / ending)
 
+Engine-extension operations (Ren'Py):
+  unpack     <archive.rpa> <dir>   Unpack an RPA-3.0 archive
+  repack     <dir> <archive.rpa>   Pack a directory tree into .rpa
+
 Discovery (per docs/protocol/03):
   manifest   CLI identity (GCWP JSON on stdout)
   features   CLI capabilities (GCWP JSON on stdout)
@@ -65,7 +69,7 @@ go build -o sirenhead-tool ./cmd/sirenhead-tool   # or: make build
 Expected output:
 
 ```text
-sirenhead 0.4.0
+sirenhead 0.5.0
 protocol gcwp 1.0
 engine renpy (7.x compatible)
 ```
@@ -126,6 +130,39 @@ the file diff has exactly one line per edited unit.
 `text/metadata.*` flags and `text.lifecycle.written_on: never` in
 `gallate.yaml` decide which of those keys are emitted at all; see
 [`gallate.yaml` support](#gallateyaml-support).
+
+## Packed archives (`.rpa`)
+
+Ren'Py ships game assets (images, audio, fonts, `.rpyc` scripts) packed
+into `.rpa` archives. Ren'Py loads them transparently at runtime; the
+`extract` / `inject` pipeline here expects files on disk. Two
+companion subcommands turn archives into trees and back:
+
+```bash
+# 1. Unpack an archive into a directory tree.
+./sirenhead-tool unpack /path/to/game/archive.rpa /tmp/unpacked
+
+# 2. Run the standard extract / inject / build cycle against
+#    the unpacked tree (and translated copies inside it).
+./sirenhead-tool -et /path/to/project/gallate.yaml
+./sirenhead-tool -it /path/to/project/gallate.yaml
+
+# 3. Repack the (now-translated) tree into a fresh archive.
+./sirenhead-tool repack /tmp/unpacked /path/to/out.rpa
+```
+
+The unpacker emits an `archive.manifest.json` audit sidecar next to
+the tree (it is excluded from a subsequent repack of the same
+directory). Both subcommands accept the standard `--ignore` flag and
+`--dry-run`; the repack additionally accepts `--engine.rpa-key=HEXHEXHEX`
+to override the default XOR key (`42424242`, Ren'Py's own default).
+
+Verified against four DDLC archives (`fonts`, `scripts`, `audio`,
+`images`) and BAD END THEATER's `archive.rpa` (1901 entries). The
+`unpack` → `repack` round-trip is byte-identical for every file.
+
+GCWP wrappers use the same operations: `{"operation":"unpack", ...}` and
+`{"operation":"repack", ...}`.
 
 ## What gets extracted
 
