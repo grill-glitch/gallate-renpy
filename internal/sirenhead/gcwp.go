@@ -157,6 +157,10 @@ func runRequest(w *gcwpWriter, req map[string]any, errOut io.Writer) int {
 		_ = w.event("started", fieldsOf("id", opID, "operation", "validate"))
 		_ = w.event("completed", fieldsOf("id", opID, "operation", "validate"))
 		return GCWPOK
+	case "unpack":
+		return gcwpArchive(w, req, errOut, opID, "unpack")
+	case "repack":
+		return gcwpArchive(w, req, errOut, opID, "repack")
 	default:
 		fmt.Fprintf(errOut, "unsupported operation: %q\n", op)
 		return GCWPUnsupportedOperation
@@ -309,6 +313,16 @@ func gcwpIdentify(w *gcwpWriter, req map[string]any, opID string) int {
 		case hasPrefix(head, []byte("RENPY RPC2")):
 			matched = append(matched, identifyMatch("high", "magic_bytes",
 				"52 45 4e 50 59 20 52 50 43 32", false))
+		case hasPrefix(head, []byte("RPA-3.0 ")):
+			// Ren'Py RPA-3.0 archives: the game is inside one or
+			// more of these, so identifying a single archive lets
+			// the Wrapper drive unpack → extract → repack without
+			// knowing Ren'Py's archive scheme.
+			matched = append(matched, identifyMatch("high", "magic_bytes",
+				"52 50 41 2d 33 2e 30 20", false))
+		case hasPrefix(head, []byte("RPA-2.0 ")):
+			matched = append(matched, identifyMatch("medium", "magic_bytes",
+				"52 50 41 2d 32 2e 30 20", false))
 		case strings.HasSuffix(strings.ToLower(path), ".rpy"):
 			matched = append(matched, identifyMatch("medium", "extension", ".rpy", false))
 		}
@@ -446,4 +460,149 @@ func gcwpRequestToShell(req map[string]any, op string) []string {
 		}
 	}
 	return argv
+}
+
+// firstOutputPath returns the first `output[]` path from a request,
+// accepting both the plain-string and structured `{path,kind}` forms.
+// Falls back to "" when the request has no output.
+func firstOutputPath(req map[string]any) string {
+	outs, _ := req["output"].([]any)
+	if len(outs) == 0 {
+		return ""
+	}
+	switch v := outs[0].(type) {
+	case string:
+		return v
+	case map[string]any:
+		p, _ := v["path"].(string)
+		return p
+	}
+	return ""
+}
+
+// requestIgnore extracts the `ignore` array from a request as a slice
+// of strings; nil is returned when no ignore list is present.
+func requestIgnore(req map[string]any) []string {
+	arr, ok := req["ignore"].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(arr))
+	for _, item := range arr {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// requestOption returns one engine-namespaced option from a request.
+func requestOption(req map[string]any, key string) (string, bool) {
+	opts, ok := req["options"].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	v, ok := opts[key]
+	if !ok {
+		return "", false
+	}
+	s, ok := v.(string)
+	return s, ok
+}
+
+// gcwpArchive runs `unpack` / `repack` over the GCWP request.
+//
+// The two operations share their entire shape (two path arguments,
+// one option, one ignore list); they differ only in the direction
+// of the copy and the operation id echoed in events. We keep them
+// in one function so the GCWP error mapping stays in one place.
+func gcwpArchive(w *gcwpWriter, req map[string]any, errOut io.Writer, opID, op string) int {
+	started := fieldsOf("id", opID, "operation", op)
+	if err := w.event("started", started); err != nil {
+		return GCWPInternalError
+	}
+
+	src := firstInputPath(req)
+	dst := firstOutputPath(req)
+	if src == "" || dst == "" {
+		fmt.Fprintf(errOut, "%s requires both `input` and `output`\n", op)
+		_ = w.event("error", fieldsOf("code", "INVALID_ARGUMENTS",
+			"message", "both input and output are required"))
+		return GCWPInvalidArguments
+	}
+	_ = w.event("phase", fieldsOf("name", "scanning"))
+
+	rules, err := compileIgnore(requestIgnore(req))
+	if err != nil {
+		_ = w.event("error", fieldsOf("code", "INVALID_ARGUMENTS", "message", err.Error()))
+		return GCWPInvalidArguments
+	}
+	rep := &Reporter{
+		Stderr: errOut,
+		PhaseHook: func(name string) {
+			_ = w.event("phase", fieldsOf("name", name))
+		},
+		FileHook: func(action, path string) {
+			_ = w.event("file", fieldsOf("action", action, "path", path))
+		},
+		ProgressHook: func(current, total int, indeterminate bool) {
+			var totalVal any
+			if !indeterminate {
+				totalVal = total
+			}
+			_ = w.event("progress", fieldsOf("current", current, "total", totalVal))
+		},
+	}
+
+	var stats *Stats
+	switch op {
+	case "unpack":
+		arc, aerr := openArchive(src)
+		if aerr != nil {
+			fmt.Fprintf(errOut, "cannot open %s: %v\n", src, aerr)
+			_ = w.event("error", fieldsOf("code", "INPUT_NOT_FOUND",
+				"message", aerr.Error()))
+			return GCWPOperationFailed
+		}
+		_ = w.event("phase", fieldsOf("name", "extracting"))
+		st, eerr := arc.extractAll(dst, rep, rules)
+		if eerr != nil {
+			fmt.Fprintf(errOut, "unpack failed: %v\n", eerr)
+			_ = w.event("error", fieldsOf("code", "OUTPUT_FAILED",
+				"message", eerr.Error()))
+			return GCWPOperationFailed
+		}
+		writeManifest(src, dst, arc)
+		stats = &st
+	case "repack":
+		key := defaultRPAKey
+		if v, ok := requestOption(req, "rpa-key"); ok && v != "" {
+			parsed, kerr := readHexKey(v)
+			if kerr != nil {
+				fmt.Fprintf(errOut, "%v\n", kerr)
+				_ = w.event("error", fieldsOf("code", "INVALID_ARGUMENTS",
+					"message", kerr.Error()))
+				return GCWPInvalidArguments
+			}
+			key = parsed
+		}
+		_ = w.event("phase", fieldsOf("name", "writing"))
+		st, perr := PackDir(src, dst, key, rep, requestIgnore(req))
+		if perr != nil {
+			fmt.Fprintf(errOut, "repack failed: %v\n", perr)
+			_ = w.event("error", fieldsOf("code", "OUTPUT_FAILED",
+				"message", perr.Error()))
+			return GCWPOperationFailed
+		}
+		stats = &st
+	}
+
+	if err := w.event("statistics", fieldsOf("statistics", stats.statisticsJSON())); err != nil {
+		return GCWPInternalError
+	}
+	if err := w.event("completed", fieldsOf("id", opID, "operation", op,
+		"statistics", stats.statisticsJSON())); err != nil {
+		return GCWPInternalError
+	}
+	return GCWPOK
 }
