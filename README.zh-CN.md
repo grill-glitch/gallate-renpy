@@ -140,9 +140,31 @@ CLI 把译文写回 `metadata.source_offset` /
 | Standard | 事件流              | ✅   |
 | Standard | 统计                | ✅   |
 | Standard | 校验规则            | ✅   |
+| Standard | 图 / 音 / 视频     | ✅（Ren'Py 引擎扩展媒体） |
 | Full     | 取消                | ❌ 未实现 |
 | Full     | 状态流              | ❌ 未实现 |
 | Full     | 全部校验类型        | 部分（regex + constraint） |
+
+### 子媒体默认值
+
+本 CLI 按 docs/shell-layer/04 § 4.3 暴露以下引擎扩展子媒体：
+
+| 媒体  | 子媒体标识                          | 分类依据 |
+| ----- | ----------------------------------- | -------- |
+| image | `background`, `portrait`, `cg`, `ui` | `gui/` 文件夹 → `ui`；文件名提示；`script.rpy` 中 `image` / `scene` / `show` 引用 |
+| audio | `voice`, `bgm`, `sfx`                | `script.rpy` 中 `voice` / `play music` / `play sound` 引用；文件夹提示 |
+| video | `cutscene`, `opening`, `ending`      | 文件名提示；`renpy.movie_cutscene` 引用 |
+
+通过 `gallate.yaml` 覆盖：
+
+```yaml
+engine:
+  image:
+    includes: [background, portrait]
+    excludes: [ui]
+  audio:
+    excludes: [sfx]    # 不要给音效生成翻译 sidecar
+```
 
 ## 保证（由 `python -m tests.self_test` 验证）
 
@@ -179,14 +201,20 @@ SIRENHEAD_GAME_DIR=/path/to/SirenHeadDatingSim-1.0-pc/game \
 
 ## 本 CLI 不做的事
 
-- **图 / 音 / 视频抽取**。本游戏源文件里没有可本地化的图、
-  音字符串。
 - **build / repack**。Ren'Py 在运行时把 `.rpy` 编成 `.rpyc`，
   那是引擎的事。
+- **音 / 视频重编码**。本 CLI 不重编码 `.wav`、`.ogg`、`.ogv`
+  等。用户准备同名的替换文件，CLI 把它们拷进去。docs/shell-layer/12
+  § 12.7 写"不要重新编码，只重新混流"——这是上游的责任。
 - **Python 3 上的 AST 校验**。Ren'Py 7 自带的解析器是 Python 2
   代码（`import cPickle`）；在 Python 3 上正则就是权威。已经
   留了 `--engine.use-ast=true` 开关给装了 Python 2 的环境；
   其余情况是空操作。
+- **翻译记忆 / 重新抽取合并**。对已有 `target` 的工程重
+  新抽取时，会用刚抽到的 `source` 覆盖 `target`。这是按
+  docs/shell-layer/12 § 12.13 写的（翻译文件是可丢弃的
+  缓存）——但如果你要在多次抽取之间保留人工翻译，用 OmegaT
+  的 sidecar 模式，不要用本 CLI 的纯回环。
 
 ## 退出码
 

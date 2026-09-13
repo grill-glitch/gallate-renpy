@@ -47,7 +47,15 @@ def manifest_dict() -> dict:
             "formats": [
                 {"extension": ".rpy", "kind": "file"},
                 {"extension": ".rpyc", "kind": "file"},
+                {"extension": ".png", "kind": "file"},
+                {"extension": ".jpg", "kind": "file"},
+                {"extension": ".wav", "kind": "file"},
+                {"extension": ".ogg", "kind": "file"},
+                {"extension": ".ogv", "kind": "file"},
                 {"directory": "game/", "kind": "directory"},
+                {"directory": "images/", "kind": "directory"},
+                {"directory": "gui/", "kind": "directory"},
+                {"directory": "audio/", "kind": "directory"},
             ],
             "magic_bytes": [
                 # Ren'Py compiled script header (`RENPY RPC2`).
@@ -95,12 +103,15 @@ def features_dict() -> dict:
         },
         "media": {
             "text": True,
-            # No image localizations needed by this engine target.
-            "image": False,
-            # Audio localization is possible but this game has no
-            # voice acting strings in source files.
-            "audio": False,
-            "video": False,
+        # Engine-extension media. Ren'Py ships with image, audio,
+        # and video support — every game can localize any of them
+        # depending on its assets.
+        "image": True,
+        # Audio is possible when the game has voice / music / sfx
+        # files; this CLI extracts all three sub-media and lets
+        # the user filter via `gallate.yaml`'s `engine.audio.*`.
+        "audio": True,
+        "video": True,
         },
         "validation": {
             "syntax": True,

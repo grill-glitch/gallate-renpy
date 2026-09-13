@@ -62,6 +62,20 @@ def sha256_file(p: Path) -> str:
     return sha256_bytes(p.read_bytes())
 
 
+def check(cond: bool, label: str, detail: str = "") -> bool:
+    """Assert a label; print PASS/FAIL and update `_fails` count.
+
+    Returns the condition so callers can branch.
+    """
+    global _fails
+    if cond:
+        print(f"  PASS: {label}")
+        return True
+    print(f"  FAIL: {label}  [{detail}]")
+    _fails += 1
+    return False
+
+
 def run_tool(*args: str, stdin: str | None = None) -> tuple[int, str, str]:
     """Invoke the CLI; return (exit, stdout, stderr)."""
     proc = subprocess.run(
@@ -70,6 +84,11 @@ def run_tool(*args: str, stdin: str | None = None) -> tuple[int, str, str]:
         input=stdin, timeout=60,
     )
     return proc.returncode, proc.stdout, proc.stderr
+
+
+# Test-failure counter, mutated by `check()` (global for
+# convenience — we run one test pass at a time).
+_fails = 0
 
 
 def setup_game_dir(tmp: Path) -> Path:
@@ -114,7 +133,8 @@ def fresh_project(project_dir: Path, game_dir: Path) -> None:
 
 
 def main() -> int:
-    fails = 0
+    global _fails
+    _fails = 0
 
     # ------------------------------------------------------------------
     # Setup: a scratch dir we own, so we can copy/reset freely.
@@ -153,13 +173,13 @@ def main() -> int:
     rc, out, err = run_tool("-et", str(project / "gallate.yaml"))
     if rc != 0:
         print(f"FAIL: extract returned {rc}\nstderr: {err}")
-        fails += 1
+        _fails += 1
     else:
         print(f"  extract OK: {err.strip()}")
     units_dir = project / "text" / "units"
     if not units_dir.is_dir():
         print("FAIL: text/units/ not created")
-        fails += 1
+        _fails += 1
     else:
         n_units = sum(1 for _ in units_dir.glob("*.json"))
         print(f"  unit files: {n_units}")
@@ -167,7 +187,7 @@ def main() -> int:
     rc, out, err = run_tool("-it", str(project / "gallate.yaml"))
     if rc != 0:
         print(f"FAIL: inject returned {rc}\nstderr: {err}")
-        fails += 1
+        _fails += 1
     script_after = script_path.read_bytes()
     screens_after = (
         screens_path.read_bytes() if screens_path.exists() else b""
@@ -179,7 +199,7 @@ def main() -> int:
         print("  FAIL: source files differ after empty inject")
         print(f"    script.rpy:  {sha256_bytes(original_script_bytes)[:16]} → {sha256_bytes(script_after)[:16]}")
         print(f"    screens.rpy: {sha256_bytes(original_screens_bytes)[:16]} → {sha256_bytes(screens_after)[:16]}")
-        fails += 1
+        _fails += 1
 
     # ------------------------------------------------------------------
     # Test 2: minimal-diff inject.
@@ -219,7 +239,7 @@ def main() -> int:
     rc, out, err = run_tool("-it", str(project / "gallate.yaml"))
     if rc != 0:
         print(f"FAIL: inject returned {rc}\nstderr: {err}")
-        fails += 1
+        _fails += 1
     post_script = script_path.read_bytes()
     post_screens = screens_path.read_bytes() if screens_path.exists() else b""
     diff_lines = 0
@@ -248,7 +268,7 @@ def main() -> int:
     else:
         print(f"  FAIL: {diff_lines} changed (expected {edited_total}), "
               f"line_count_preserved={same_line_count}")
-        fails += 1
+        _fails += 1
 
     # Restore.
     script_path.write_bytes(original_script_bytes)
@@ -283,7 +303,7 @@ def main() -> int:
     new = b"Suddenly...Out of some OTHER place..."
     if old not in data:
         print(f"FAIL: setup missing expected source {target_source!r}")
-        fails += 1
+        _fails += 1
     else:
         script_path.write_bytes(data.replace(old, new, 1))
 
@@ -294,7 +314,7 @@ def main() -> int:
     else:
         print(f"  FAIL: expected exit=8 with drift error, got rc={rc}")
         print(f"  stderr: {err}")
-        fails += 1
+        _fails += 1
     # Atomicity: file should not have been rewritten; the drift
     # error means we never wrote the translation.
     after = script_path.read_bytes()
@@ -302,7 +322,7 @@ def main() -> int:
         print("  PASS: translation not written (atomicity preserved)")
     else:
         print("  FAIL: translation written despite drift error")
-        fails += 1
+        _fails += 1
     # And: the source modification we made should still be there
     # — the failed inject did not roll back the user's source
     # changes (correct: we never wrote anything).
@@ -310,7 +330,7 @@ def main() -> int:
         print("  PASS: source file unchanged after drift abort")
     else:
         print("  FAIL: source file unexpectedly modified")
-        fails += 1
+        _fails += 1
 
     # Restore.
     script_path.write_bytes(original_script_bytes)
@@ -332,7 +352,7 @@ def main() -> int:
         print("  PASS: .meta.json round-trip is stable")
     else:
         print("  FAIL: .meta.json differs between runs")
-        fails += 1
+        _fails += 1
     units1 = json.loads(
         (units_dir / "script.json").read_text(encoding="utf-8")
     )
@@ -346,7 +366,7 @@ def main() -> int:
         print("  PASS: position-derived ids are stable across re-extract")
     else:
         print("  FAIL: ids differ between runs")
-        fails += 1
+        _fails += 1
 
     # ------------------------------------------------------------------
     # Test 5: GCWP (Protocol layer) handshake + extract via stdin.
@@ -357,7 +377,7 @@ def main() -> int:
         print("  PASS: protocol handshake OK")
     else:
         print(f"  FAIL: protocol handshake rc={rc}, out={out!r}")
-        fails += 1
+        _fails += 1
 
     # Re-init project to clean state.
     fresh_project(project, game_dir)
@@ -371,7 +391,127 @@ def main() -> int:
         print("  PASS: GCWP extract via stdin")
     else:
         print(f"  FAIL: GCWP extract rc={rc}, out={out[:200]!r}")
-        fails += 1
+        _fails += 1
+
+    # ------------------------------------------------------------------
+    # Test 6: media round-trip (image / audio / video).
+    #
+    # Verifies the engine-extension media flags (-i, -a, -v) and
+    # the per-sidecar `target` workflow for non-text media. Empty
+    # inject must be byte-identical across image / audio / video;
+    # a non-empty target must overwrite the original file with
+    # the user's replacement.
+    # ------------------------------------------------------------------
+    print("\n=== TEST 6: media round-trip (image / audio / video) ===")
+    # Reset and extract with all media enabled.
+    fresh_project(project, game_dir)
+    (project / "gallate.yaml").write_text(
+        f"input: {game_dir}\n"
+        "media:\n  - text\n  - image\n  - audio\n  - video\n"
+        "engine:\n"
+        "  text_encoding: utf-8\n",
+        encoding="utf-8",
+    )
+    rc, out, err = run_tool("-etiava", str(project / "gallate.yaml"))
+    if not check(rc == 0, "media+text extract returns 0", err[:200]):
+        _fails += 1
+    # Expect at least one image / audio / video sidecar (fixture
+    # has Background1.png, Character1.png, test_sound.wav,
+    # Ending.ogv).
+    img_sidecars = list((project / "image").rglob("*.json")) if (
+        project / "image").is_dir() else []
+    aud_sidecars = list((project / "audio").rglob("*.json")) if (
+        project / "audio").is_dir() else []
+    vid_sidecars = list((project / "video").rglob("*.json")) if (
+        project / "video").is_dir() else []
+    if not check(len(img_sidecars) >= 1, f"image sidecars >= 1 ({len(img_sidecars)})"):
+        _fails += 1
+    if not check(len(aud_sidecars) >= 1, f"audio sidecars >= 1 ({len(aud_sidecars)})"):
+        _fails += 1
+    if not check(len(vid_sidecars) >= 1, f"video sidecars >= 1 ({len(vid_sidecars)})"):
+        _fails += 1
+
+    # Sub-test 6a: empty inject → all media byte-identical.
+    # Snapshot every image/audio/video file's bytes.
+    media_files = (
+        [(p, p.read_bytes()) for p in game_dir.rglob("*")
+         if p.is_file() and p.suffix.lower() in {
+             ".png", ".jpg", ".wav", ".ogg", ".ogv", ".webm",
+         }]
+    )
+    rc, out, err = run_tool("-itiava", str(project / "gallate.yaml"))
+    if not check(rc == 0, "empty media inject returns 0", err[:200]):
+        _fails += 1
+    for path, original in media_files:
+        try:
+            current = path.read_bytes()
+        except OSError:
+            continue
+        if not check(current == original,
+                     f"empty inject: {path.name} unchanged"):
+            _fails += 1
+            break  # one fail is enough; the test is the contract
+
+    # Sub-test 6b: replace one image. Set `target` on the first
+    # image sidecar to a different PNG, then inject and verify the
+    # file on disk is the replacement.
+    if img_sidecars:
+        first = img_sidecars[0]
+        doc = json.loads(first.read_text(encoding="utf-8"))
+        # The replacement file is just the bytes of the OTHER
+        # fixture PNG. Same extension, different content.
+        replacement = project / "tmp-replacement.png"
+        # Use a different valid PNG — invert a few bytes.
+        replacement.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+        doc["entries"][0]["target"] = str(replacement)
+        doc["entries"][0]["state"] = "translated"
+        first.write_text(
+            json.dumps(doc, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        source_rel = doc["entries"][0]["metadata"]["source_path"]
+        expected_dest = game_dir / source_rel
+        # Snapshot the pre-replacement bytes.
+        pre_replace = expected_dest.read_bytes()
+        rc, out, err = run_tool("-itiava", str(project / "gallate.yaml"))
+        if not check(rc == 0, "media inject with target returns 0",
+                     err[:200]):
+            _fails += 1
+        post_replace = expected_dest.read_bytes()
+        if not check(post_replace == replacement.read_bytes(),
+                     "image inject: file matches replacement"):
+            _fails += 1
+        if not check(post_replace != pre_replace,
+                     "image inject: file differs from original"):
+            _fails += 1
+        # Restore the original so subsequent tests / cleanup
+        # work cleanly. (We have the bytes in `pre_replace`.)
+        expected_dest.write_bytes(pre_replace)
+        replacement.unlink(missing_ok=True)
+
+    # Sub-test 6c: GCWP media extract via stdin emits media
+    # counts in the statistics event.
+    fresh_project(project, game_dir)
+    (project / "gallate.yaml").write_text(
+        f"input: {game_dir}\n"
+        "media:\n  - image\n  - audio\n  - video\n",
+        encoding="utf-8",
+    )
+    rc, out, err = run_tool(
+        stdin=json.dumps({
+            "type": "request", "id": "01HEXTRACT2",
+            "operation": "extract",
+            "input": [{"path": str(project / "gallate.yaml"), "kind": "file"}],
+        }),
+    )
+    has_media_stats = (
+        rc == 0
+        and '"images"' in out
+        and '"audio"' in out
+        and '"video"' in out
+    )
+    if not check(has_media_stats, "GCWP extract emits image/audio/video stats"):
+        _fails += 1
 
     # ------------------------------------------------------------------
     # Cleanup.
@@ -385,11 +525,11 @@ def main() -> int:
     # Summary.
     # ------------------------------------------------------------------
     print()
-    if fails == 0:
+    if _fails == 0:
         print("ALL TESTS PASSED")
         return 0
     else:
-        print(f"{fails} TEST(S) FAILED")
+        print(f"{_fails} TEST(S) FAILED")
         return 1
 
 

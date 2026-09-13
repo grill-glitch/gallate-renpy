@@ -4,6 +4,55 @@ All notable changes to `sirenhead-tool` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-09-13
+
+### Added
+
+- **Image, audio, and video extraction** (Ren'Py engine-extension
+  media). The CLI now picks up every `*.png`/`*.jpg` (image),
+  `*.wav`/`*.ogg` (audio), and `*.ogv`/`*.webm` (video) in the
+  game directory and classifies each by sub-media.
+- **Sub-media classification** per docs/shell-layer/04 § 4.3:
+  - image → `background`, `portrait`, `cg`, `ui` (gui/ folder
+    → ui; filename hints; script.rpy refs).
+  - audio → `voice`, `bgm`, `sfx` (voice/music/sound refs;
+    folder hints).
+  - video → `cutscene`, `opening`, `ending` (filename hints;
+    `renpy.movie_cutscene` refs).
+- **Sub-media filtering** via `gallate.yaml` (`engine.<media>.{includes,excludes}`)
+  or CLI flags (`--engine.image.includes=...`).
+- **Per-file media sidecars** under `image/<sub_media>/<rel>.json`,
+  `audio/<sub_media>/<rel>.json`, `video/<sub_media>/<rel>.json`
+  — same `gallate.translation` v1 shape as text units, so the
+  Wrapper / OmegaT pipeline treats them uniformly.
+- **Media inject** via per-unit `target` path: copy the
+  user-supplied replacement file atomically over the original.
+  Empty target = file untouched (byte-identical round-trip).
+- **Manifest enrichment**: `manifest.targets.formats` now lists
+  `.png`, `.jpg`, `.wav`, `.ogg`, `.ogv` and the `images/`,
+  `gui/`, `audio/` directories.
+- **Self-test Test 6** (`media round-trip`) covers image /
+  audio / video byte-identity + replacement workflow.
+
+### Changed
+
+- `features.media.{image, audio, video}` now `true` (was
+  `false` in 0.1.0). This is the engine-extension media
+  declaration per docs/protocol/03 § "Features".
+- `do_extract()` and `do_inject()` now drive media in addition
+  to text; the statistics payload includes `images`,
+  `audio`, `video` counts.
+- `_inject_text()` is now a separate helper; the new
+  `do_inject()` composes text + media via `_resolve_in_place()`.
+
+### Fixed
+
+- Verify script and self-test now snapshot every file in the
+  user's game directory and refuse to proceed if any were
+  modified by the test run. (Earlier versions of the script
+  could be tricked into overwriting the user's originals;
+  this is now an explicit guard.)
+
 ## [0.1.0] — 2026-09-13
 
 ### Added

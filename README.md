@@ -142,9 +142,32 @@ in the gallate repo:
 | Standard | event streaming      | ✅     |
 | Standard | statistics emission  | ✅     |
 | Standard | validation rules     | ✅     |
+| Standard | image / audio / video | ✅ (Ren'Py engine-extension media) |
 | Full    | cancellation          | ❌ not implemented |
 | Full    | status streaming      | ❌ not implemented |
 | Full    | all validation types  | partial (regex + constraint) |
+
+### Sub-media defaults
+
+This CLI exposes these engine-extension sub-media per
+docs/shell-layer/04 § 4.3:
+
+| Media  | Sub-media identifiers              | Classification source |
+| ------ | ---------------------------------- | --------------------- |
+| image  | `background`, `portrait`, `cg`, `ui` | `gui/` folder → `ui`; filename hints; `script.rpy` `image`/`scene`/`show` refs |
+| audio  | `voice`, `bgm`, `sfx`               | `script.rpy` `voice` / `play music` / `play sound` refs; folder hints |
+| video  | `cutscene`, `opening`, `ending`     | filename hints; `renpy.movie_cutscene` refs |
+
+Override via `gallate.yaml`:
+
+```yaml
+engine:
+  image:
+    includes: [background, portrait]
+    excludes: [ui]
+  audio:
+    excludes: [sfx]    # don't ship translation sidecars for SFX
+```
 
 ## Guarantees (verified by `python -m tests.self_test`)
 
@@ -182,15 +205,24 @@ SIRENHEAD_GAME_DIR=/path/to/SirenHeadDatingSim-1.0-pc/game \
 
 ## What this CLI does NOT do
 
-- **Image / audio / video extraction.** The game has no
-  localized images or audio strings in source form.
 - **Build / repack.** Ren'Py compiles `.rpyc` from `.rpy` on
   demand; the engine owns that step.
+- **Audio / video re-encoding.** This CLI does not re-encode
+  `.wav`, `.ogg`, `.ogv`, etc. The user supplies replacement
+  files at the same path; the CLI copies them in. Per
+  docs/shell-layer/12 § 12.7 videos "should not be re-encoded,
+  only re-muxed" — that responsibility is upstream.
 - **AST validation on Python 3.** Ren'Py 7's bundled parser is
   Python 2 code (`import cPickle`); the regex is authoritative
   on Python 3. An `--engine.use-ast=true` flag is wired up for
   hosts that have a Python 2 interpreter; otherwise it's a
   no-op.
+- **Translation memory / re-extraction merge.** Re-extracting
+  a project with non-empty `target` fields overwrites them with
+  the freshly-extracted `source`. This is per docs/shell-layer/12
+  § 12.13 (translation files are disposable caches) — but if
+  you want to preserve human edits across re-extracts, use the
+  OmegaT sidecar pattern, not this CLI's plain round-trip.
 
 ## Exit codes
 

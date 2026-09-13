@@ -28,6 +28,7 @@ the test — the self_test hashes it.
 
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 
 CONTENT = (
@@ -68,6 +69,30 @@ SCREENS_CONTENT = (
     '    text "Version 0.1.0"\r\n'
 )
 
+# Minimal valid PNG (1x1 black, 67 bytes after base64 decode).
+# We use a tiny but valid file so image-inject tests have
+# something to copy.
+_FIXTURE_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+    "YPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+)
+# Minimal valid WAV (RIFF header + 1 sample of silence).
+import struct as _struct
+_FIXTURE_WAV = (
+    b"RIFF" + _struct.pack("<I", 36) + b"WAVE"
+    + b"fmt " + _struct.pack("<I", 16)
+    + _struct.pack("<H", 1)         # PCM
+    + _struct.pack("<H", 1)         # mono
+    + _struct.pack("<I", 22050)     # sample rate
+    + _struct.pack("<I", 22050)     # byte rate
+    + _struct.pack("<H", 1)         # block align
+    + _struct.pack("<H", 16)        # bits per sample
+    + b"data" + _struct.pack("<I", 0)
+)
+# Minimal video stub — engine doesn't care about content for
+# these byte-stability tests.
+_FIXTURE_OGV = b"\x00" * 256
+
 
 def write_fixtures(game_dir: Path) -> tuple[Path, Path]:
     """Write the fixture files under `game_dir`.
@@ -81,4 +106,12 @@ def write_fixtures(game_dir: Path) -> tuple[Path, Path]:
     # utf-8 + BOM.
     script.write_bytes(b"\xef\xbb\xbf" + CONTENT.encode("utf-8"))
     screens.write_bytes(b"\xef\xbb\xbf" + SCREENS_CONTENT.encode("utf-8"))
+    # Media fixtures — minimal valid files so image / audio /
+    # video extract has something to chew on.
+    images = game_dir / "images"
+    images.mkdir(exist_ok=True)
+    (images / "Background1.png").write_bytes(_FIXTURE_PNG)
+    (images / "Character1.png").write_bytes(_FIXTURE_PNG)
+    (images / "Ending.ogv").write_bytes(_FIXTURE_OGV)
+    (game_dir / "test_sound.wav").write_bytes(_FIXTURE_WAV)
     return script, screens

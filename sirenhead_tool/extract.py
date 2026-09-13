@@ -45,6 +45,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -55,6 +56,9 @@ from .renpy_extract import (
     extract_directory,
     ast_fallback_validate,
 )
+
+# Kept in sync with pyproject.toml.
+__version__ = "0.2.0"
 
 # Translation unit file format. Per docs/shell-layer/12 § 12.4.1:
 UNIT_FORMAT = "gallate.translation"
@@ -247,15 +251,55 @@ def _atomic_write_json(path: Path, data: dict) -> None:
         raise
 
 
+def _parse_sub_media_overrides(
+    config: dict,
+    args,
+    media_kind: str,
+) -> tuple[set[str] | None, set[str] | None]:
+    """Pull `engine.<media>.{includes,excludes}` from config + flags.
+
+    CLI `--engine.<media>.includes=...` takes precedence over
+    `gallate.yaml`'s `engine.<media>.includes`. Empty string
+    means "use config"; missing means "use default".
+    """
+    cfg_block = (config.get("engine") or {}).get(media_kind) or {}
+    cfg_includes = cfg_block.get("includes")
+    cfg_excludes = cfg_block.get("excludes")
+    # CLI flag overrides.
+    cli_includes_raw = args.engine_opts.get(f"{media_kind}.includes")
+    cli_excludes_raw = args.engine_opts.get(f"{media_kind}.excludes")
+    includes = _split_csv(cli_includes_raw) if cli_includes_raw is not None else (
+        set(cfg_includes) if cfg_includes else None
+    )
+    excludes = _split_csv(cli_excludes_raw) if cli_excludes_raw is not None else (
+        set(cfg_excludes) if cfg_excludes else None
+    )
+    return includes, excludes
+
+
+def _split_csv(raw: str) -> set[str]:
+    return {x.strip() for x in raw.split(",") if x.strip()}
+
+
+def _resolve_in_place(args, config: dict, input_path: Path) -> tuple[bool, Path | None]:
+    """Decide inject's destination per `--engine.in-place` and `--output`."""
+    in_place = args.engine_opts.get("in-place", "true").lower() != "false"
+    if args.output is None or in_place:
+        return in_place, None
+    p = args.output
+    if not p.is_absolute():
+        p = (args.project_root / p).resolve()
+    return in_place, p
+
+
 def do_extract(args) -> dict:
     """Run the extract operation; return the operation's statistics.
 
-    Side effects: writes `text/units/*.json` and `.meta.json`.
+    Side effects: writes text + image + audio + video sidecars
+    under the project root, plus `.meta.json`.
     """
     t0 = datetime.now(timezone.utc)
     project_root: Path = args.project_root
-    # Per docs/shell-layer/05 § 5.3, `input` is the game path,
-    # resolved relative to the Project Root unless absolute.
     config = _load_config(args.gallate_yaml)
     input_path = _resolve(config.get("input"), project_root)
     if input_path is None:
@@ -263,10 +307,9 @@ def do_extract(args) -> dict:
     if not input_path.is_dir():
         raise RuntimeError(f"`input:` is not a directory: {input_path}")
 
+    # ----- text media -----
     extracted = extract_directory(input_path)
-    # Optional AST fallback (Python 2 only — no-op here).
     ast_fallback_validate(extracted, input_path)
-
     units = build_units(extracted, input_path)
     group_units_by_line(units)
     units_by_file = write_unit_files(
@@ -274,16 +317,33 @@ def do_extract(args) -> dict:
         language_pair=("en", _target_lang(config)),
     )
 
-    # Build + write `.meta.json`.
-    meta_entries = []
+    # ----- image / audio / video media -----
+    from . import media as media_mod
+    img_inc, img_exc = _parse_sub_media_overrides(config, args, "image")
+    aud_inc, aud_exc = _parse_sub_media_overrides(config, args, "audio")
+    vid_inc, vid_exc = _parse_sub_media_overrides(config, args, "video")
+    try:
+        inv, media_by_kind = media_mod.extract_media(
+            input_path, project_root,
+            image_includes=img_inc, image_excludes=img_exc,
+            audio_includes=aud_inc, audio_excludes=aud_exc,
+            video_includes=vid_inc, video_excludes=vid_exc,
+        )
+    except ValueError as e:
+        # Sub-media misconfiguration.
+        sys.stderr.write(f"extract failed: {e}\n")
+        raise
+
+    # ----- .meta.json -----
+    from .meta import atomic_write, new_meta
+    meta_entries: list[dict] = []
     for project_file, group in units_by_file.items():
-        # Aggregate fields per source file.
         source_rel = group[0]["metadata"]["source_file"]
         meta_entries.append({
             "project": str(project_file.relative_to(project_root)),
             "source": source_rel,
             "type": "text",
-            "cli": {"id": "sirenhead", "version": "0.1.0"},
+            "cli": {"id": "sirenhead", "version": __version__},
             "engine": {"id": "renpy"},
             "sub_media": group[0]["metadata"]["renpy_kind"],
             "size": project_file.stat().st_size,
@@ -295,15 +355,34 @@ def do_extract(args) -> dict:
                 },
             },
         })
-    from .meta import atomic_write, new_meta
+    meta_entries.extend(
+        media_mod.build_media_meta_entries(inv, media_by_kind, project_root)
+    )
     atomic_write(project_root, new_meta(project_root, meta_entries))
 
     t1 = datetime.now(timezone.utc)
+    n_media = (
+        len(media_by_kind["image"])
+        + len(media_by_kind["audio"])
+        + len(media_by_kind["video"])
+    )
     return {
         "files": {"scanned": len(extracted), "processed": len(units)},
         "text": {"extracted": len(units)},
+        "images": {
+            "extracted": len(media_by_kind["image"]),
+            "copied": 0,
+        },
+        "audio": {
+            "extracted": len(media_by_kind["audio"]),
+            "copied": 0,
+        },
+        "video": {
+            "extracted": len(media_by_kind["video"]),
+            "copied": 0,
+        },
         "output": {
-            "created": len(units_by_file),
+            "created": len(units_by_file) + n_media,
             "bytes_written": sum(p.stat().st_size for p in units_by_file),
         },
         "duration": (t1 - t0).total_seconds(),
@@ -313,8 +392,9 @@ def do_extract(args) -> dict:
 def do_inject(args) -> dict:
     """Run the inject operation; return the operation's statistics.
 
-    Side effects: rewrites .rpy files in `gallate.yaml`'s `input`
-    (or `--output`) directory.
+    Side effects: rewrites .rpy files (text media) and copies
+    image / audio / video replacement files in
+    `gallate.yaml`'s `input` (or `--output`) directory.
     """
     import time
 
@@ -325,23 +405,52 @@ def do_inject(args) -> dict:
     if input_path is None or not input_path.is_dir():
         raise RuntimeError(f"input directory not found: {input_path}")
 
-    # Determine the destination. By default inject is in-place:
-    # we rewrite the same files inside `input_path`. The user may
-    # pass `--output PATH` to redirect; per docs/shell-layer/10 §
-    # 10.5 in-place is engine-specific and we declare it via the
-    # `inject.in-place=true` engine option.
-    in_place = args.engine_opts.get("in-place", "true").lower() != "false"
-    output_path: Path = args.output if args.output else input_path
-    if args.output and not in_place:
-        output_path = (project_root / args.output).resolve() if not args.output.is_absolute() else args.output
+    # Destination per `--engine.in-place` + `--output`.
+    in_place, output_root = _resolve_in_place(args, config, input_path)
 
-    # Load all unit files.
+    text_stats = _inject_text(args, project_root, input_path, in_place, output_root)
+    from . import media as media_mod
+    media_res = media_mod.inject_media(
+        project_root, input_path,
+        in_place=in_place, output_root=output_root,
+    )
+    text_stats["duration"] = time.monotonic() - t0
+    text_stats["images"] = {"copied": media_res.images_copied}
+    text_stats["audio"] = {"copied": media_res.audios_copied}
+    text_stats["video"] = {"copied": media_res.videos_copied}
+    text_stats["output"]["bytes_written"] = (
+        text_stats["output"]["bytes_written"] + media_res.bytes_copied
+    )
+    return text_stats
+
+
+def _inject_text(
+    args,
+    project_root: Path,
+    input_path: Path,
+    in_place: bool,
+    output_root: Path | None,
+) -> dict:
+    """Inject text-only changes. Returns the stats dict."""
     units_dir = project_root / "text" / "units"
     if not units_dir.is_dir():
-        raise RuntimeError(f"text/units/ not found: {units_dir}")
+        # No text units is fine (the project may be media-only).
+        return {
+            "files": {"processed": 0},
+            "text": {"injected": 0},
+            "output": {"bytes_written": 0},
+            "validation": {"errors": 0, "warnings": 0},
+            "duration": 0.0,
+        }
     unit_files = sorted(units_dir.glob("*.json"))
     if not unit_files:
-        raise RuntimeError(f"no unit files in {units_dir}")
+        return {
+            "files": {"processed": 0},
+            "text": {"injected": 0},
+            "output": {"bytes_written": 0},
+            "validation": {"errors": 0, "warnings": 0},
+            "duration": 0.0,
+        }
 
     # Group units by source file so we read each .rpy once.
     units_by_source: dict[str, list[dict]] = {}
@@ -350,10 +459,6 @@ def do_inject(args) -> dict:
         for u in doc["entries"]:
             units_by_source.setdefault(u["metadata"]["source_file"], []).append(u)
 
-    # Track per-source-file rewrites. We read each .rpy once,
-    # apply ALL pending edits in memory, write atomically, then
-    # move to the next file. This matches the "minimum-diff"
-    # guarantee per the gallate-engine-cli skill.
     result = InjectionResult(0, 0, 0, 0, 0, 0, 0.0)
     for source_rel, units in units_by_source.items():
         source_abs = input_path / source_rel
@@ -363,8 +468,6 @@ def do_inject(args) -> dict:
             raise RuntimeError(
                 f"source file listed in units not found: {source_abs}"
             )
-        # Build the rewrite plan in source order. Each entry:
-        # (offset, length, expected_source, new_body)
         edits: list[tuple[int, int, str, str]] = []
         for u in units:
             result.units_total += 1
@@ -382,61 +485,27 @@ def do_inject(args) -> dict:
         edits.sort(key=lambda e: e[0])
 
         raw = source_abs.read_bytes()
-        # Gate 1 + 2 + 3: source-drift + atomic rewrite.
-        # We accumulate replacements and verify the expected
-        # source substring matches what's currently in the file.
         rewritten = bytearray(raw)
-        # Walk edits in REVERSE order so byte offsets stay valid
-        # after earlier edits. Each edit replaces a span of
-        # `length` bytes at `offset` with the new body. To make
-        # the file parseable again we keep the surrounding quote
-        # bytes; the body is inserted between them.
-        new_total_length = sum(len(n) - length for _, length, _, n in edits)
-        # We need to be careful: each edit replaces
-        # `<indent+speaker>"<body>"` with the same prefix but a
-        # different body. The simplest approach: re-encode the
-        # edit by replacing the body substring (between the
-        # quotes) byte-for-byte.
         for offset, length, expected_source, new_body in reversed(edits):
-            # The expected body is the substring from offset+1 to
-            # offset+length-1 (i.e. between the quotes). Verify it
-            # matches the unit's `source` byte-for-byte.
             current = raw[offset:offset + length]
-            # The current span includes indent/speaker/quotes; the
-            # unit's `source` is the body only. Reconstruct the
-            # expected span.
-            # The pattern in Ren'Py: `<indent>[<char> ]"<body>"`
-            # We rebuild by replacing the body. The body's byte
-            # range is `[+1, -1)` of the full span.
-            body_lo = offset
-            # Find the first `"` byte.
             try:
-                first_quote = raw.index(b'"', body_lo, offset + length)
-                last_quote = raw.rindex(b'"', body_lo, offset + length)
+                first_quote = raw.index(b'"', offset, offset + length)
+                last_quote = raw.rindex(b'"', offset, offset + length)
             except ValueError:
                 raise RuntimeError(
                     f"could not locate quote pair in {source_rel} "
                     f"at offset {offset}"
                 )
             body_span = raw[first_quote + 1:last_quote]
-            # Drift check (gate 1).
             expected_body = expected_source.encode("utf-8")
             if body_span != expected_body:
-                # Mark drifted; skip this edit.
                 result.units_drifted += 1
-                # The edit is already in `edits` so we need to
-                # NOT apply it. We restructure: skip this offset.
-                # The simplest is to bail out for the whole file
-                # if ANY drift is found, per the "never silent
-                # corruption" rule.
                 raise RuntimeError(
                     f"source drift in {source_rel} unit {expected_source!r} "
                     f"(expected {len(expected_body)} bytes, found "
                     f"{len(body_span)} bytes at offset {first_quote + 1})"
                 )
-            # Encoding gate (gate 3).
             new_body_bytes = new_body.encode("utf-8")
-            # Apply the edit by replacing the body slice.
             new_span = (
                 raw[offset:first_quote + 1]
                 + new_body_bytes
@@ -450,16 +519,12 @@ def do_inject(args) -> dict:
             result.units_injected += 1
             result.bytes_written += len(new_span)
 
-        # Atomic write: temp file → validate → replace.
-        if not in_place and output_path != input_path:
-            # Copy the entire directory if not in-place. For this
-            # game's small size we just do a copy + modify.
-            output_path.mkdir(parents=True, exist_ok=True)
-        dest = output_path / source_rel
+        if not in_place and output_root is not None:
+            output_root.mkdir(parents=True, exist_ok=True)
+        dest = (output_root or input_path) / source_rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write_bytes(dest, bytes(rewritten))
 
-    result.duration = time.monotonic() - t0
     return {
         "files": {"processed": len(units_by_source)},
         "text": {"injected": result.units_injected},
@@ -468,7 +533,7 @@ def do_inject(args) -> dict:
             "errors": result.units_drifted,
             "warnings": 0,
         },
-        "duration": result.duration,
+        "duration": 0.0,  # filled by caller
     }
 
 

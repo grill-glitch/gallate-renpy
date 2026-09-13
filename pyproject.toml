@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sirenhead-tool"
-version = "0.1.0"
+version = "0.2.0"
 description = "A gallate CLI for Ren'Py game translation. Extract dialog and UI text, translate, inject back — with byte-stable round-trips and source-drift detection."
 readme = "README.md"
 license = {text = "CC-BY-SA-4.0"}
